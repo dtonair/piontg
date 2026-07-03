@@ -1,0 +1,58 @@
+package telegram
+
+import (
+	"context"
+
+	"piontg/folders"
+	"piontg/pi"
+	"piontg/session"
+)
+
+type Messenger interface {
+	SendMessage(ctx context.Context, chatID int64, text string, keyboard InlineKeyboard) (int, error)
+	EditMessage(ctx context.Context, chatID int64, messageID int, text string) error
+	AnswerCallback(ctx context.Context, callbackID, text string) error
+}
+
+type InlineKeyboard [][]Button
+
+type Button struct {
+	Text string
+	Data string
+}
+
+type Update struct {
+	Message  *Message
+	Callback *Callback
+}
+
+type Message struct {
+	ChatID int64
+	UserID int64
+	Text   string
+}
+
+type Callback struct {
+	ID        string
+	ChatID    int64
+	UserID    int64
+	MessageID int
+	Data      string
+}
+
+type Session interface {
+	SelectFolder(ctx context.Context, path string) error
+	SelectModel(ctx context.Context, provider, modelID string) error
+	AvailableModels(ctx context.Context) ([]pi.ModelInfo, error)
+	Prompt(ctx context.Context, message string) error
+	Abort(ctx context.Context) error
+	NewSession(ctx context.Context) (bool, error)
+	Stop(ctx context.Context) error
+	Status() session.Status
+	Events() <-chan pi.Event
+}
+
+type FolderPolicy interface {
+	Discover() ([]folders.Choice, error)
+	ResolveToken(token string) (string, folders.EffectivePolicy, error)
+}

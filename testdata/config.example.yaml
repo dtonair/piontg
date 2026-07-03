@@ -1,0 +1,30 @@
+telegram:
+  # Prefer tokenEnv in real deployments so the token is not stored in the config file.
+  token: "123456:example-token-for-dry-run"
+  tokenEnv: ""
+  allowedUserId: 123456789
+
+state:
+  dir: "./.piontg-state"
+
+pi:
+  binary: "pi"
+  # Defaults to <state.dir>/pi-sessions when omitted.
+  sessionDir: "./.piontg-state/pi-sessions"
+  # Safe default: project-local Pi resources are not trusted unless explicitly configured.
+  defaultTrust: "no-approve"
+  # When a Telegram message arrives while Pi is streaming: follow_up or steer.
+  defaultStreamingBehavior: "follow_up"
+  # Empty tools means Pi's default tools. Configure to restrict, e.g. [read, grep, find, ls].
+  tools: []
+  excludeTools: []
+
+folders:
+  maxDepth: 4
+  maxEntries: 200
+  roots:
+    - name: "code"
+      path: "./"
+      trust: "no-approve"
+      tools: []
+      excludeTools: []

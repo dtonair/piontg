@@ -1,0 +1,35 @@
+telegram:
+  # Prefer tokenEnv in real deployments so the token is not stored in the config file.
+  # Create a bot with @BotFather, then export TELEGRAM_BOT_TOKEN before starting piontg.
+  tokenEnv: "TELEGRAM_BOT_TOKEN"
+  token: ""
+  # Single authorized Telegram numeric user ID. All other users are rejected.
+  allowedUserId: 123456789
+
+state:
+  # Stores piontg state.json and Pi session files by default.
+  dir: "~/.local/state/piontg"
+
+pi:
+  binary: "pi"
+  # Defaults to <state.dir>/pi-sessions when omitted.
+  sessionDir: "~/.local/state/piontg/pi-sessions"
+  # Safe default: project-local Pi resources are not trusted unless explicitly configured per root.
+  defaultTrust: "no-approve"
+  # When a Telegram message arrives while Pi is streaming: follow_up or steer.
+  defaultStreamingBehavior: "follow_up"
+  # Empty tools means Pi's default tools. Configure to restrict, e.g. [read, grep, find, ls].
+  tools: []
+  excludeTools: []
+
+folders:
+  # Folder picker includes each root and descendants up to maxDepth, capped by maxEntries.
+  maxDepth: 4
+  maxEntries: 200
+  roots:
+    - name: "code"
+      path: "~/code"
+      trust: "no-approve"
+      # Optional per-root tool policy overrides pi.tools / pi.excludeTools when non-empty.
+      tools: []
+      excludeTools: []
