@@ -160,6 +160,59 @@ func TestHandleLineRoutesEvents(t *testing.T) {
 	}
 }
 
+func TestHandleLineDoesNotDropCriticalEventsWhenQueueFull(t *testing.T) {
+	client, _ := testClient()
+	for i := 0; i < cap(client.events); i++ {
+		client.events <- Event{Type: "queued"}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handleLine([]byte(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"x"}}`))
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("critical event was not backpressured, err=%v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	<-client.events
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handleLine() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for critical event delivery")
+	}
+
+	found := false
+	for len(client.events) > 0 {
+		if (<-client.events).Type == "message_update" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("critical message_update was not delivered")
+	}
+}
+
+func TestHandleLineDropsNonCriticalEventsWhenQueueFull(t *testing.T) {
+	client, _ := testClient()
+	for i := 0; i < cap(client.events); i++ {
+		client.events <- Event{Type: "queued"}
+	}
+	if err := client.handleLine([]byte(`{"type":"tool_execution_start","toolName":"bash"}`)); err != nil {
+		t.Fatalf("handleLine() error = %v", err)
+	}
+	for len(client.events) > 0 {
+		if event := <-client.events; event.Type == "tool_execution_start" {
+			t.Fatal("non-critical event should have been dropped when queue is full")
+		}
+	}
+}
+
 func TestTypedMethodsDecodeData(t *testing.T) {
 	client, writer := testClient()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -186,6 +239,44 @@ func TestTypedMethodsDecodeData(t *testing.T) {
 	models := <-modelsCh
 	if len(models) != 1 || models[0].Provider != "anthropic" || models[0].ID != "claude" {
 		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestGetCommandsDecodeData(t *testing.T) {
+	client, writer := testClient()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	commandsCh := make(chan []CommandInfo, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		commands, err := client.GetCommands(ctx)
+		commandsCh <- commands
+		errCh <- err
+	}()
+	var sent map[string]any
+	if err := json.Unmarshal(<-writer.writes, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["type"] != "get_commands" {
+		t.Fatalf("sent command = %#v", sent)
+	}
+	resp := `{"id":"` + sent["id"].(string) + `","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"skill:asana-cli","description":"Use Asana","source":"skill","location":"user","path":"/home/user/.agents/skills/asana-cli/SKILL.md"},{"name":"fix-tests","description":"Fix failing tests","source":"prompt","location":"project","path":"/repo/.pi/prompts/fix-tests.md"}]}}`
+	if err := client.handleLine([]byte(resp)); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("GetCommands() error = %v", err)
+	}
+	commands := <-commandsCh
+	if len(commands) != 2 {
+		t.Fatalf("commands = %#v", commands)
+	}
+	if commands[0].Name != "skill:asana-cli" || commands[0].Description != "Use Asana" || commands[0].Source != "skill" || commands[0].Location != "user" || commands[0].Path == "" {
+		t.Fatalf("first command = %#v", commands[0])
+	}
+	if commands[1].Name != "fix-tests" || commands[1].Source != "prompt" || commands[1].Location != "project" {
+		t.Fatalf("second command = %#v", commands[1])
 	}
 }
 

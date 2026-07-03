@@ -113,6 +113,14 @@ func (m *Manager) AvailableModels(ctx context.Context) ([]pi.ModelInfo, error) {
 	return client.GetAvailableModels(ctx)
 }
 
+func (m *Manager) AvailableCommands(ctx context.Context) ([]pi.CommandInfo, error) {
+	client, err := m.EnsureStarted(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetCommands(ctx)
+}
+
 func (m *Manager) Prompt(ctx context.Context, message string) error {
 	client, err := m.EnsureStarted(ctx)
 	if err != nil {
@@ -200,8 +208,18 @@ func (m *Manager) EnsureStarted(ctx context.Context) (PiClient, error) {
 		return nil, fmt.Errorf("no folder selected")
 	}
 	state := m.state
-	effective := m.policyForSelected
 	m.mu.Unlock()
+
+	selectedBefore := state.SelectedFolder
+	canonical, effective, err := m.policy.Resolve(selectedBefore)
+	if err != nil {
+		return nil, fmt.Errorf("selected folder is no longer allowed or available: %w", err)
+	}
+	if canonical != state.SelectedFolder {
+		state.SelectedFolder = canonical
+		state.SessionFile = ""
+		state.SessionID = ""
+	}
 
 	model := ""
 	if state.SelectedModel != nil {
@@ -222,6 +240,17 @@ func (m *Manager) EnsureStarted(ctx context.Context) (PiClient, error) {
 		return nil, err
 	}
 	m.mu.Lock()
+	if m.state.SelectedFolder != selectedBefore {
+		m.mu.Unlock()
+		_ = client.Stop(ctx)
+		return m.EnsureStarted(ctx)
+	}
+	if state.SelectedFolder != selectedBefore {
+		m.state.SelectedFolder = state.SelectedFolder
+		m.state.SessionFile = ""
+		m.state.SessionID = ""
+		m.policyForSelected = effective
+	}
 	// Another goroutine may have started one while this process spawned. Keep the first live one and stop ours.
 	if m.client != nil {
 		if !clientClosed(m.client) {
@@ -267,6 +296,10 @@ func (m *Manager) forwardEvents(client PiClient) {
 			m.isStreaming = false
 		}
 		m.mu.Unlock()
+		if isCriticalStreamEvent(event.Type) {
+			m.events <- event
+			continue
+		}
 		select {
 		case m.events <- event:
 		default:
@@ -278,6 +311,15 @@ func (m *Manager) forwardEvents(client PiClient) {
 		m.isStreaming = false
 	}
 	m.mu.Unlock()
+}
+
+func isCriticalStreamEvent(typ string) bool {
+	switch typ {
+	case "message_update", "agent_start", "agent_end":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) handleExtensionUIRequest(client PiClient, event pi.Event) {

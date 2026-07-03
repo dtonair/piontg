@@ -22,7 +22,7 @@ Implemented MVP:
 - Pi session directory support
 - Folder/model pickers via inline keyboards
 - Assistant streaming renderer with Telegram-safe chunking/edit throttling
-- `/start`, `/folder`, `/model`, `/new`, `/abort`, `/status`, `/stop`, `/help`
+- `/start`, `/folder`, `/model`, `/skills`, `/new`, `/abort`, `/status`, `/stop`, `/help`
 
 ## Prerequisites
 
@@ -82,13 +82,14 @@ Important fields:
 - `/start` - show current state and next action
 - `/folder` - choose a configured folder/subfolder
 - `/model` - choose a Pi model from `get_available_models`
+- `/skills` - show Pi skills from `get_commands`
 - `/new` - start a new Pi session in the selected folder
 - `/abort` - abort the current Pi turn
 - `/status` - show folder/model/session/streaming state
 - `/stop` - stop the Pi subprocess
 - `/help` - show command help
 
-After selecting a folder and model, send a normal Telegram message to prompt Pi.
+After selecting a folder and model, send a normal Telegram message to prompt Pi. Pi skill commands such as `/skill:name <request>` are forwarded to Pi.
 
 ## Security model
 

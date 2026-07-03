@@ -61,6 +61,19 @@ type modelsData struct {
 	Models []ModelInfo `json:"models"`
 }
 
+// CommandInfo describes a Pi slash command available through RPC prompt input.
+type CommandInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Source      string `json:"source"`
+	Location    string `json:"location,omitempty"`
+	Path        string `json:"path,omitempty"`
+}
+
+type commandsData struct {
+	Commands []CommandInfo `json:"commands"`
+}
+
 type newSessionData struct {
 	Cancelled bool `json:"cancelled"`
 }

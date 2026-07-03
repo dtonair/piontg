@@ -13,6 +13,7 @@ import (
 const (
 	DefaultMaxMessageRunes = 4096
 	DefaultEditInterval    = 1500 * time.Millisecond
+	DefaultTypingInterval  = 4 * time.Second
 )
 
 type Sink interface {
@@ -20,23 +21,35 @@ type Sink interface {
 	EditMessage(ctx context.Context, messageID int, text string) error
 }
 
-type Renderer struct {
-	sink         Sink
-	maxRunes     int
-	editInterval time.Duration
-	now          func() time.Time
+type TypingSink interface {
+	SendTyping(ctx context.Context) error
+}
 
+type Renderer struct {
+	sink           Sink
+	maxRunes       int
+	editInterval   time.Duration
+	typingInterval time.Duration
+	now            func() time.Time
+
+	assistant  textStream
+	lastTyping time.Time
+}
+
+type textStream struct {
 	activeID int
 	buffer   string
 	lastEdit time.Time
+	prefix   string
 }
 
 func New(sink Sink) *Renderer {
 	return &Renderer{
-		sink:         sink,
-		maxRunes:     DefaultMaxMessageRunes,
-		editInterval: DefaultEditInterval,
-		now:          time.Now,
+		sink:           sink,
+		maxRunes:       DefaultMaxMessageRunes,
+		editInterval:   DefaultEditInterval,
+		typingInterval: DefaultTypingInterval,
+		now:            time.Now,
 	}
 }
 
@@ -55,6 +68,12 @@ func (r *Renderer) SetClock(now func() time.Time) {
 	}
 }
 
+func (r *Renderer) SetTypingInterval(interval time.Duration) {
+	if interval >= 0 {
+		r.typingInterval = interval
+	}
+}
+
 func (r *Renderer) HandleEvent(ctx context.Context, event pi.Event) error {
 	switch event.Type {
 	case "message_update":
@@ -62,8 +81,21 @@ func (r *Renderer) HandleEvent(ctx context.Context, event pi.Event) error {
 		if err := json.Unmarshal(event.Raw, &parsed); err != nil {
 			return err
 		}
-		if parsed.AssistantMessageEvent.Type == "text_delta" && parsed.AssistantMessageEvent.Delta != "" {
-			return r.AppendText(ctx, parsed.AssistantMessageEvent.Delta)
+		assistantEvent := parsed.AssistantMessageEvent
+		delta := assistantEvent.delta()
+		if isThinkingEventType(assistantEvent.Type) && delta != "" {
+			return r.SendTyping(ctx)
+		}
+		if isTextEventType(assistantEvent.Type) && delta != "" {
+			return r.AppendText(ctx, delta)
+		}
+	case "thinking_update", "thinking_delta", "reasoning_update", "reasoning_delta":
+		var parsed streamingTextEvent
+		if err := json.Unmarshal(event.Raw, &parsed); err != nil {
+			return err
+		}
+		if delta := parsed.delta(); delta != "" {
+			return r.SendTyping(ctx)
 		}
 	case "tool_execution_start":
 		var parsed toolStartEvent
@@ -89,40 +121,64 @@ func (r *Renderer) HandleEvent(ctx context.Context, event pi.Event) error {
 }
 
 func (r *Renderer) AppendText(ctx context.Context, delta string) error {
+	return r.appendToStream(ctx, &r.assistant, delta)
+}
+
+func (r *Renderer) AppendThinking(ctx context.Context, _ string) error {
+	return r.SendTyping(ctx)
+}
+
+func (r *Renderer) SendTyping(ctx context.Context) error {
+	typingSink, ok := r.sink.(TypingSink)
+	if !ok {
+		return nil
+	}
+	now := r.now()
+	if !r.lastTyping.IsZero() && now.Sub(r.lastTyping) < r.typingInterval {
+		return nil
+	}
+	if err := typingSink.SendTyping(ctx); err != nil {
+		return err
+	}
+	r.lastTyping = now
+	return nil
+}
+
+func (r *Renderer) appendToStream(ctx context.Context, stream *textStream, delta string) error {
 	remaining := delta
 	for remaining != "" {
-		space := r.maxRunes - runeLen(r.buffer)
+		space := r.streamCapacity(stream) - runeLen(stream.buffer)
 		if space <= 0 {
-			if err := r.finalizeChunk(ctx); err != nil {
+			if err := r.finalizeChunk(ctx, stream); err != nil {
 				return err
 			}
-			space = r.maxRunes
+			space = r.streamCapacity(stream)
 		}
 		part, rest := splitRunes(remaining, space)
 		if part == "" && rest != "" {
 			part, rest = rest, ""
 		}
-		r.buffer += part
-		if r.activeID == 0 {
-			id, err := r.sink.SendMessage(ctx, r.buffer)
+		stream.buffer += part
+		if stream.activeID == 0 {
+			id, err := r.sink.SendMessage(ctx, stream.render())
 			if err != nil {
 				return err
 			}
-			r.activeID = id
-			r.lastEdit = r.now()
-		} else if r.now().Sub(r.lastEdit) >= r.editInterval {
-			if err := r.sink.EditMessage(ctx, r.activeID, r.buffer); err != nil {
-				id, sendErr := r.sink.SendMessage(ctx, r.buffer)
+			stream.activeID = id
+			stream.lastEdit = r.now()
+		} else if r.now().Sub(stream.lastEdit) >= r.editInterval {
+			if err := r.sink.EditMessage(ctx, stream.activeID, stream.render()); err != nil {
+				id, sendErr := r.sink.SendMessage(ctx, stream.render())
 				if sendErr != nil {
 					return fmt.Errorf("edit failed: %v; fallback send failed: %w", err, sendErr)
 				}
-				r.activeID = id
+				stream.activeID = id
 			}
-			r.lastEdit = r.now()
+			stream.lastEdit = r.now()
 		}
 		remaining = rest
-		if remaining != "" && runeLen(r.buffer) >= r.maxRunes {
-			if err := r.finalizeChunk(ctx); err != nil {
+		if remaining != "" && runeLen(stream.buffer) >= r.streamCapacity(stream) {
+			if err := r.finalizeChunk(ctx, stream); err != nil {
 				return err
 			}
 		}
@@ -131,42 +187,109 @@ func (r *Renderer) AppendText(ctx context.Context, delta string) error {
 }
 
 func (r *Renderer) Flush(ctx context.Context) error {
-	if r.activeID == 0 || r.buffer == "" {
-		r.activeID = 0
-		r.buffer = ""
+	return r.flushStream(ctx, &r.assistant)
+}
+
+func (r *Renderer) flushStream(ctx context.Context, stream *textStream) error {
+	if stream.activeID == 0 || stream.buffer == "" {
+		stream.activeID = 0
+		stream.buffer = ""
 		return nil
 	}
-	if err := r.sink.EditMessage(ctx, r.activeID, r.buffer); err != nil {
-		_, sendErr := r.sink.SendMessage(ctx, r.buffer)
+	if err := r.sink.EditMessage(ctx, stream.activeID, stream.render()); err != nil {
+		_, sendErr := r.sink.SendMessage(ctx, stream.render())
 		if sendErr != nil {
 			return fmt.Errorf("flush edit failed: %v; fallback send failed: %w", err, sendErr)
 		}
 	}
-	r.activeID = 0
-	r.buffer = ""
-	r.lastEdit = time.Time{}
+	stream.activeID = 0
+	stream.buffer = ""
+	stream.lastEdit = time.Time{}
 	return nil
 }
 
-func (r *Renderer) finalizeChunk(ctx context.Context) error {
-	if r.activeID != 0 && r.buffer != "" {
-		if err := r.sink.EditMessage(ctx, r.activeID, r.buffer); err != nil {
-			if _, sendErr := r.sink.SendMessage(ctx, r.buffer); sendErr != nil {
+func (r *Renderer) finalizeChunk(ctx context.Context, stream *textStream) error {
+	if stream.activeID != 0 && stream.buffer != "" {
+		if err := r.sink.EditMessage(ctx, stream.activeID, stream.render()); err != nil {
+			if _, sendErr := r.sink.SendMessage(ctx, stream.render()); sendErr != nil {
 				return fmt.Errorf("final edit failed: %v; fallback send failed: %w", err, sendErr)
 			}
 		}
 	}
-	r.activeID = 0
-	r.buffer = ""
-	r.lastEdit = time.Time{}
+	stream.activeID = 0
+	stream.buffer = ""
+	stream.lastEdit = time.Time{}
 	return nil
 }
 
+func (r *Renderer) streamCapacity(stream *textStream) int {
+	capacity := r.maxRunes - runeLen(stream.prefix)
+	if capacity <= 0 {
+		return r.maxRunes
+	}
+	return capacity
+}
+
+func (s *textStream) render() string {
+	if s.prefix == "" || s.buffer == "" {
+		return s.buffer
+	}
+	return s.prefix + s.buffer
+}
+
 type messageUpdateEvent struct {
-	AssistantMessageEvent struct {
-		Type  string `json:"type"`
-		Delta string `json:"delta"`
-	} `json:"assistantMessageEvent"`
+	AssistantMessageEvent streamingTextEvent `json:"assistantMessageEvent"`
+}
+
+type streamingTextEvent struct {
+	Type      string       `json:"type"`
+	Delta     textFragment `json:"delta"`
+	Text      textFragment `json:"text"`
+	Content   textFragment `json:"content"`
+	Thinking  textFragment `json:"thinking"`
+	Reasoning textFragment `json:"reasoning"`
+	Thought   textFragment `json:"thought"`
+}
+
+type textFragment string
+
+func (f *textFragment) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err == nil {
+		*f = textFragment(value)
+		return nil
+	}
+	var nested map[string]json.RawMessage
+	if err := json.Unmarshal(data, &nested); err != nil {
+		return nil
+	}
+	for _, key := range []string{"delta", "text", "content", "thinking", "reasoning", "thought"} {
+		if raw, ok := nested[key]; ok {
+			if err := json.Unmarshal(raw, &value); err == nil && value != "" {
+				*f = textFragment(value)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+func (e streamingTextEvent) delta() string {
+	for _, value := range []textFragment{e.Delta, e.Text, e.Content, e.Thinking, e.Reasoning, e.Thought} {
+		if value != "" {
+			return string(value)
+		}
+	}
+	return ""
+}
+
+func isTextEventType(typ string) bool {
+	return typ == "text_delta"
+}
+
+func isThinkingEventType(typ string) bool {
+	typ = strings.ToLower(typ)
+	return strings.Contains(typ, "thinking") || strings.Contains(typ, "reasoning") || strings.Contains(typ, "thought")
 }
 
 type toolStartEvent struct {

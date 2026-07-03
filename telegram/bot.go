@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -58,6 +59,11 @@ func (m *MessengerAdapter) EditMessage(_ context.Context, chatID int64, messageI
 	return err
 }
 
+func (m *MessengerAdapter) SendChatAction(_ context.Context, chatID int64, action string) error {
+	_, err := m.bot.Request(tgbotapi.NewChatAction(chatID, action))
+	return err
+}
+
 func (m *MessengerAdapter) AnswerCallback(_ context.Context, callbackID, text string) error {
 	callback := tgbotapi.NewCallback(callbackID, text)
 	_, err := m.bot.Request(callback)
@@ -93,11 +99,17 @@ func RunPolling(ctx context.Context, bot BotAPI, handler *Handler, allowedUserID
 	}
 }
 
+const DefaultHTTPTimeout = 60 * time.Second
+
 func NewRealBot(token string) (*tgbotapi.BotAPI, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("telegram token is required")
 	}
-	return tgbotapi.NewBotAPI(token)
+	return tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, newTelegramHTTPClient())
+}
+
+func newTelegramHTTPClient() *http.Client {
+	return &http.Client{Timeout: DefaultHTTPTimeout}
 }
 
 func convertUpdate(update tgbotapi.Update) (Update, bool) {

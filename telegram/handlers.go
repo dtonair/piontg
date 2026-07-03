@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"piontg/authz"
 	"piontg/pi"
@@ -19,6 +20,7 @@ import (
 const (
 	callbackFolderPrefix  = "folder:"
 	callbackModelPrefix   = "model:"
+	callbackSkillPrefix   = "skill:"
 	callbackCommandPrefix = "cmd:"
 )
 
@@ -29,15 +31,17 @@ type Handler struct {
 	auth      authz.Authorizer
 	logger    *slog.Logger
 
-	mu          sync.Mutex
-	modelTokens map[string]pi.ModelInfo
+	mu             sync.Mutex
+	modelTokens    map[string]pi.ModelInfo
+	commandTokens  map[string]pi.CommandInfo
+	typingInterval time.Duration
 }
 
 func NewHandler(messenger Messenger, sess Session, folderPolicy FolderPolicy, authorizer authz.Authorizer, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{messenger: messenger, session: sess, folders: folderPolicy, auth: authorizer, logger: logger, modelTokens: make(map[string]pi.ModelInfo)}
+	return &Handler{messenger: messenger, session: sess, folders: folderPolicy, auth: authorizer, logger: logger, modelTokens: make(map[string]pi.ModelInfo), commandTokens: make(map[string]pi.CommandInfo), typingInterval: render.DefaultTypingInterval}
 }
 
 func (h *Handler) HandleUpdate(ctx context.Context, update Update) error {
@@ -53,17 +57,48 @@ func (h *Handler) HandleUpdate(ctx context.Context, update Update) error {
 func (h *Handler) StartEventRendering(ctx context.Context, chatID int64) {
 	sink := &RenderSink{Messenger: h.messenger, ChatID: chatID}
 	r := render.New(sink)
+	typingInterval := h.typingInterval
+	if typingInterval <= 0 {
+		typingInterval = render.DefaultTypingInterval
+	}
+	r.SetTypingInterval(typingInterval)
 	go func() {
+		ticker := time.NewTicker(typingInterval)
+		defer ticker.Stop()
+		typingActive := h.session.Status().IsStreaming
+		if typingActive {
+			if err := r.SendTyping(ctx); err != nil {
+				h.logger.Warn("send typing heartbeat", "error", err)
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-ticker.C:
+				if !h.session.Status().IsStreaming {
+					typingActive = false
+					continue
+				}
+				typingActive = true
+				if err := r.SendTyping(ctx); err != nil {
+					h.logger.Warn("send typing heartbeat", "error", err)
+				}
 			case event, ok := <-h.session.Events():
 				if !ok {
 					return
 				}
+				if event.Type == "agent_start" {
+					typingActive = true
+					if err := r.SendTyping(ctx); err != nil {
+						h.logger.Warn("send typing heartbeat", "error", err)
+					}
+				}
 				if err := r.HandleEvent(ctx, event); err != nil {
 					h.logger.Warn("render pi event", "type", event.Type, "error", err)
+				}
+				if event.Type == "agent_end" {
+					typingActive = false
 				}
 			}
 		}
@@ -79,11 +114,18 @@ func (h *Handler) handleMessage(ctx context.Context, msg Message) error {
 	if text == "" {
 		return nil
 	}
+	if strings.HasPrefix(text, "/skill:") {
+		return h.sendPrompt(ctx, msg.ChatID, text)
+	}
 	if strings.HasPrefix(text, "/") {
 		return h.handleCommand(ctx, msg.ChatID, commandName(text))
 	}
+	return h.sendPrompt(ctx, msg.ChatID, text)
+}
+
+func (h *Handler) sendPrompt(ctx context.Context, chatID int64, text string) error {
 	if err := h.session.Prompt(ctx, text); err != nil {
-		_, _ = h.messenger.SendMessage(ctx, msg.ChatID, "Error: "+err.Error(), nil)
+		_, _ = h.messenger.SendMessage(ctx, chatID, "Error: "+err.Error(), nil)
 		return err
 	}
 	return nil
@@ -100,6 +142,8 @@ func (h *Handler) handleCommand(ctx context.Context, chatID int64, command strin
 		return h.sendFolderPicker(ctx, chatID)
 	case "model":
 		return h.sendModelPicker(ctx, chatID)
+	case "skills":
+		return h.sendSkillPicker(ctx, chatID)
 	case "new":
 		cancelled, err := h.session.NewSession(ctx)
 		if err != nil {
@@ -160,6 +204,17 @@ func (h *Handler) handleCallback(ctx context.Context, cb Callback) error {
 		_ = h.messenger.AnswerCallback(ctx, cb.ID, "Folder selected")
 		_, err = h.messenger.SendMessage(ctx, cb.ChatID, "Selected folder:\n"+path+"\n\nUse /model to choose a model, then send a message.", nil)
 		return err
+	case strings.HasPrefix(data, callbackSkillPrefix):
+		token := strings.TrimPrefix(data, callbackSkillPrefix)
+		command, ok := h.lookupCommand(token)
+		if !ok {
+			_ = h.messenger.AnswerCallback(ctx, cb.ID, "Skill list expired")
+			_, err := h.messenger.SendMessage(ctx, cb.ChatID, "Skill list expired. Run /skills again.", nil)
+			return err
+		}
+		_ = h.messenger.AnswerCallback(ctx, cb.ID, "Skill details")
+		_, err := h.messenger.SendMessage(ctx, cb.ChatID, formatSkillCommandDetails(command), nil)
+		return err
 	case strings.HasPrefix(data, callbackModelPrefix):
 		token := strings.TrimPrefix(data, callbackModelPrefix)
 		model, ok := h.lookupModel(token)
@@ -185,8 +240,10 @@ func (h *Handler) sendStart(ctx context.Context, chatID int64) error {
 	keyboard := InlineKeyboard{{
 		{Text: "Choose folder", Data: "cmd:folder"},
 		{Text: "Choose model", Data: "cmd:model"},
+	}, {
+		{Text: "Show skills", Data: "cmd:skills"},
 	}}
-	// cmd:* callbacks are intentionally not handled yet; commands are clearer and less stateful.
+
 	_, err := h.messenger.SendMessage(ctx, chatID, "Pi Telegram bot ready.\n\n"+formatStatus(h.session.Status())+"\n\nUse /folder to begin.", keyboard)
 	return err
 }
@@ -239,11 +296,49 @@ func (h *Handler) sendModelPicker(ctx context.Context, chatID int64) error {
 	return err
 }
 
+func (h *Handler) sendSkillPicker(ctx context.Context, chatID int64) error {
+	commands, err := h.session.AvailableCommands(ctx)
+	if err != nil {
+		_, _ = h.messenger.SendMessage(ctx, chatID, "Could not list skills: "+err.Error(), nil)
+		return err
+	}
+	skills := make([]pi.CommandInfo, 0, len(commands))
+	for _, command := range commands {
+		if command.Source == "skill" || strings.HasPrefix(command.Name, "skill:") {
+			skills = append(skills, command)
+		}
+	}
+	if len(skills) == 0 {
+		_, err := h.messenger.SendMessage(ctx, chatID, "No Pi skills available for the selected folder.", nil)
+		return err
+	}
+	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
+	keyboard := make(InlineKeyboard, 0, len(skills))
+	h.mu.Lock()
+	h.commandTokens = make(map[string]pi.CommandInfo, len(skills))
+	for _, skill := range skills {
+		token := commandToken(skill)
+		h.commandTokens[token] = skill
+		label := strings.TrimPrefix(skill.Name, "skill:")
+		keyboard = append(keyboard, []Button{{Text: truncate(label, 60), Data: callbackSkillPrefix + token}})
+	}
+	h.mu.Unlock()
+	_, err = h.messenger.SendMessage(ctx, chatID, "Choose a skill to view details:", keyboard)
+	return err
+}
+
 func (h *Handler) lookupModel(token string) (pi.ModelInfo, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	model, ok := h.modelTokens[token]
 	return model, ok
+}
+
+func (h *Handler) lookupCommand(token string) (pi.CommandInfo, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	command, ok := h.commandTokens[token]
+	return command, ok
 }
 
 func commandName(text string) string {
@@ -257,6 +352,29 @@ func commandName(text string) string {
 func modelToken(model pi.ModelInfo) string {
 	sum := sha256.Sum256([]byte(model.Provider + "/" + model.ID))
 	return base64.RawURLEncoding.EncodeToString(sum[:])[:16]
+}
+
+func commandToken(command pi.CommandInfo) string {
+	sum := sha256.Sum256([]byte(command.Name + "\x00" + command.Path))
+	return base64.RawURLEncoding.EncodeToString(sum[:])[:16]
+}
+
+func formatSkillCommandDetails(command pi.CommandInfo) string {
+	usage := "/" + command.Name
+	lines := []string{
+		"Skill: " + strings.TrimPrefix(command.Name, "skill:"),
+	}
+	if command.Description != "" {
+		lines = append(lines, "", command.Description)
+	}
+	lines = append(lines, "", "Invoke by sending:", usage+" <request>")
+	if command.Location != "" {
+		lines = append(lines, "", "Location: "+command.Location)
+	}
+	if command.Path != "" {
+		lines = append(lines, "Path: "+command.Path)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func formatStatus(status session.Status) string {
@@ -277,6 +395,7 @@ func helpText() string {
 		"/start - show current state",
 		"/folder - choose a configured folder",
 		"/model - choose a Pi model",
+		"/skills - show available Pi skills",
 		"/new - start a new Pi session",
 		"/abort - abort current Pi turn",
 		"/status - show current status",
@@ -284,6 +403,7 @@ func helpText() string {
 		"/help - show this help",
 		"",
 		"After selecting a folder/model, send a normal message to chat with Pi.",
+		"Skill commands like /skill:name are forwarded to Pi.",
 	}, "\n")
 }
 

@@ -11,10 +11,11 @@ import (
 )
 
 type fakeSink struct {
-	nextID int
-	sends  []string
-	edits  []editCall
-	edErr  error
+	nextID  int
+	sends   []string
+	edits   []editCall
+	typings int
+	edErr   error
 }
 
 type editCall struct {
@@ -33,6 +34,11 @@ func (f *fakeSink) EditMessage(_ context.Context, messageID int, text string) er
 		return f.edErr
 	}
 	f.edits = append(f.edits, editCall{id: messageID, text: text})
+	return nil
+}
+
+func (f *fakeSink) SendTyping(context.Context) error {
+	f.typings++
 	return nil
 }
 
@@ -121,6 +127,65 @@ func TestRendererHandlesMessageUpdateAndToolEvents(t *testing.T) {
 	}
 	if !strings.Contains(sink.sends[1], "🔧 bash") || !strings.Contains(sink.sends[1], "```bash\ngo test ./...\n```") {
 		t.Fatalf("tool start = %q", sink.sends[1])
+	}
+}
+
+func TestRendererSendsTypingForThinkingDeltas(t *testing.T) {
+	sink := &fakeSink{}
+	r := New(sink)
+	r.SetLimits(100, 0)
+	ctx := context.Background()
+
+	events := []pi.Event{
+		{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"plan"}}`)},
+		{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"ning"}}`)},
+		{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Answer"}}`)},
+		{Type: "agent_end", Raw: []byte(`{"type":"agent_end"}`)},
+	}
+	for _, event := range events {
+		if err := r.HandleEvent(ctx, event); err != nil {
+			t.Fatalf("HandleEvent(%s) error = %v", event.Type, err)
+		}
+	}
+
+	if sink.typings != 1 {
+		t.Fatalf("typings = %d", sink.typings)
+	}
+	if len(sink.sends) != 1 || sink.sends[0] != "Answer" {
+		t.Fatalf("sends = %#v", sink.sends)
+	}
+}
+
+func TestRendererHandlesTopLevelThinkingEvent(t *testing.T) {
+	sink := &fakeSink{}
+	r := New(sink)
+	ctx := context.Background()
+
+	if err := r.HandleEvent(ctx, pi.Event{Type: "reasoning_delta", Raw: []byte(`{"type":"reasoning_delta","text":"considering"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if sink.typings != 1 {
+		t.Fatalf("typings = %d", sink.typings)
+	}
+	if len(sink.sends) != 0 {
+		t.Fatalf("sends = %#v", sink.sends)
+	}
+}
+
+func TestRendererHandlesNestedThinkingDeltaObject(t *testing.T) {
+	sink := &fakeSink{}
+	r := New(sink)
+	ctx := context.Background()
+
+	event := pi.Event{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":{"type":"thinking_delta","thinking":"nested"}}}`)}
+	if err := r.HandleEvent(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	if sink.typings != 1 {
+		t.Fatalf("typings = %d", sink.typings)
+	}
+	if len(sink.sends) != 0 {
+		t.Fatalf("sends = %#v", sink.sends)
 	}
 }
 

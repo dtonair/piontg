@@ -8,10 +8,11 @@ import (
 )
 
 type recordingBot struct {
-	sends      []tgbotapi.MessageConfig
-	requests   []tgbotapi.EditMessageTextConfig
-	sendErrs   []error
-	requestErr []error
+	sends       []tgbotapi.MessageConfig
+	requests    []tgbotapi.EditMessageTextConfig
+	chatActions []tgbotapi.ChatActionConfig
+	sendErrs    []error
+	requestErr  []error
 }
 
 func (b *recordingBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
@@ -31,11 +32,14 @@ func (b *recordingBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 }
 
 func (b *recordingBot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
-	edit, ok := c.(tgbotapi.EditMessageTextConfig)
-	if !ok {
+	switch request := c.(type) {
+	case tgbotapi.EditMessageTextConfig:
+		b.requests = append(b.requests, request)
+	case tgbotapi.ChatActionConfig:
+		b.chatActions = append(b.chatActions, request)
+	default:
 		return nil, errors.New("unexpected request config")
 	}
-	b.requests = append(b.requests, edit)
 	if len(b.requestErr) > 0 {
 		err := b.requestErr[0]
 		b.requestErr = b.requestErr[1:]
@@ -97,5 +101,26 @@ func TestMessengerAdapterFallsBackToPlainTextOnParseError(t *testing.T) {
 	}
 	if bot.sends[1].ParseMode != "" || bot.sends[1].Text != "Repo **piontg**" {
 		t.Fatalf("fallback send = %#v", bot.sends[1])
+	}
+}
+
+func TestMessengerAdapterSendsChatAction(t *testing.T) {
+	bot := &recordingBot{}
+	messenger := NewMessengerAdapter(bot)
+	if err := messenger.SendChatAction(nil, 123, tgbotapi.ChatTyping); err != nil {
+		t.Fatal(err)
+	}
+	if len(bot.chatActions) != 1 {
+		t.Fatalf("chatActions = %#v", bot.chatActions)
+	}
+	if bot.chatActions[0].ChatID != 123 || bot.chatActions[0].Action != tgbotapi.ChatTyping {
+		t.Fatalf("chatAction = %#v", bot.chatActions[0])
+	}
+}
+
+func TestNewTelegramHTTPClientHasTimeout(t *testing.T) {
+	client := newTelegramHTTPClient()
+	if client.Timeout != DefaultHTTPTimeout {
+		t.Fatalf("Timeout = %v, want %v", client.Timeout, DefaultHTTPTimeout)
 	}
 }

@@ -15,3 +15,7 @@ func (s *RenderSink) SendMessage(ctx context.Context, text string) (int, error) 
 func (s *RenderSink) EditMessage(ctx context.Context, messageID int, text string) error {
 	return s.Messenger.EditMessage(ctx, s.ChatID, messageID, text)
 }
+
+func (s *RenderSink) SendTyping(ctx context.Context) error {
+	return s.Messenger.SendChatAction(ctx, s.ChatID, "typing")
+}

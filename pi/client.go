@@ -130,6 +130,14 @@ func (c *Client) GetAvailableModels(ctx context.Context) ([]ModelInfo, error) {
 	return out.Models, nil
 }
 
+func (c *Client) GetCommands(ctx context.Context) ([]CommandInfo, error) {
+	var out commandsData
+	if err := c.requestData(ctx, "get_commands", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Commands, nil
+}
+
 func (c *Client) SetModel(ctx context.Context, provider, modelID string) (ModelInfo, error) {
 	var out ModelInfo
 	err := c.requestData(ctx, "set_model", map[string]any{"provider": provider, "modelId": modelID}, &out)
@@ -331,12 +339,26 @@ func (c *Client) handleLine(line []byte) error {
 		return nil
 	}
 	event := Event{Type: typ, Raw: append([]byte(nil), line...)}
+	if isCriticalStreamEvent(typ) {
+		c.events <- event
+		return nil
+	}
 	select {
 	case c.events <- event:
 	default:
-		// Do not block stdout reading. Later phases render best-effort status.
+		// Do not block stdout reading for non-critical events. Assistant stream
+		// text and turn boundary events are delivered above without silent drops.
 	}
 	return nil
+}
+
+func isCriticalStreamEvent(typ string) bool {
+	switch typ {
+	case "message_update", "agent_start", "agent_end":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) deliverResponse(resp Response) {

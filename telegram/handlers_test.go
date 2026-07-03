@@ -14,10 +14,11 @@ import (
 )
 
 type fakeMessenger struct {
-	nextID    int
-	sends     []sentMessage
-	edits     []string
-	callbacks []string
+	nextID      int
+	sends       []sentMessage
+	edits       []string
+	chatActions []string
+	callbacks   []string
 }
 
 type sentMessage struct {
@@ -35,15 +36,20 @@ func (f *fakeMessenger) EditMessage(_ context.Context, _ int64, _ int, text stri
 	f.edits = append(f.edits, text)
 	return nil
 }
+func (f *fakeMessenger) SendChatAction(_ context.Context, _ int64, action string) error {
+	f.chatActions = append(f.chatActions, action)
+	return nil
+}
 func (f *fakeMessenger) AnswerCallback(_ context.Context, _ string, text string) error {
 	f.callbacks = append(f.callbacks, text)
 	return nil
 }
 
 type fakeSession struct {
-	models []pi.ModelInfo
-	status session.Status
-	events chan pi.Event
+	models   []pi.ModelInfo
+	commands []pi.CommandInfo
+	status   session.Status
+	events   chan pi.Event
 
 	selectedFolder string
 	selectedModel  string
@@ -56,7 +62,11 @@ type fakeSession struct {
 }
 
 func newFakeSession() *fakeSession {
-	return &fakeSession{events: make(chan pi.Event, 10), models: []pi.ModelInfo{{Provider: "anthropic", ID: "claude", Name: "Claude", ContextWindow: 100}}}
+	return &fakeSession{
+		events:   make(chan pi.Event, 10),
+		models:   []pi.ModelInfo{{Provider: "anthropic", ID: "claude", Name: "Claude", ContextWindow: 100}},
+		commands: []pi.CommandInfo{{Name: "skill:asana-cli", Description: "Use Asana", Source: "skill", Location: "user", Path: "/skills/asana/SKILL.md"}, {Name: "fix-tests", Description: "Fix tests", Source: "prompt"}},
+	}
 }
 func (f *fakeSession) SelectFolder(_ context.Context, path string) error {
 	f.selectedFolder = path
@@ -70,6 +80,9 @@ func (f *fakeSession) SelectModel(_ context.Context, provider, modelID string) e
 }
 func (f *fakeSession) AvailableModels(context.Context) ([]pi.ModelInfo, error) {
 	return f.models, f.availableErr
+}
+func (f *fakeSession) AvailableCommands(context.Context) ([]pi.CommandInfo, error) {
+	return f.commands, nil
 }
 func (f *fakeSession) Prompt(_ context.Context, message string) error {
 	f.prompts = append(f.prompts, message)
@@ -172,6 +185,39 @@ func TestModelPickerAndCallback(t *testing.T) {
 	}
 }
 
+func TestSkillPickerAndCallback(t *testing.T) {
+	h, messenger, _, _ := setupHandler()
+	ctx := context.Background()
+	if err := h.HandleUpdate(ctx, Update{Message: &Message{ChatID: 1, UserID: 42, Text: "/skills"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(messenger.sends) != 1 || len(messenger.sends[0].keyboard) != 1 {
+		t.Fatalf("skill sends = %#v", messenger.sends)
+	}
+	button := messenger.sends[0].keyboard[0][0]
+	if button.Text != "asana-cli" || !strings.HasPrefix(button.Data, callbackSkillPrefix) {
+		t.Fatalf("skill button = %#v", button)
+	}
+	if err := h.HandleUpdate(ctx, Update{Callback: &Callback{ID: "cb", ChatID: 1, UserID: 42, Data: button.Data}}); err != nil {
+		t.Fatal(err)
+	}
+	last := messenger.sends[len(messenger.sends)-1].text
+	if !strings.Contains(last, "Skill: asana-cli") || !strings.Contains(last, "/skill:asana-cli <request>") || !strings.Contains(last, "Use Asana") {
+		t.Fatalf("skill details = %q", last)
+	}
+}
+
+func TestSkillCommandIsForwardedToPi(t *testing.T) {
+	h, _, sess, _ := setupHandler()
+	ctx := context.Background()
+	if err := h.HandleUpdate(ctx, Update{Message: &Message{ChatID: 1, UserID: 42, Text: "/skill:asana-cli inspect task"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.prompts) != 1 || sess.prompts[0] != "/skill:asana-cli inspect task" {
+		t.Fatalf("prompts = %#v", sess.prompts)
+	}
+}
+
 func TestMessageAndControlCommands(t *testing.T) {
 	h, messenger, sess, _ := setupHandler()
 	ctx := context.Background()
@@ -217,4 +263,67 @@ func TestEventRendering(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("render did not send/edit: sends=%#v edits=%#v", messenger.sends, messenger.edits)
+}
+
+func TestEventRenderingKeepsTypingUntilAgentEnd(t *testing.T) {
+	h, messenger, sess, _ := setupHandler()
+	h.typingInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess.status.IsStreaming = true
+	h.StartEventRendering(ctx, 1)
+
+	sess.events <- pi.Event{Type: "agent_start", Raw: []byte(`{"type":"agent_start"}`)}
+	waitForRepeatedTyping(t, messenger)
+
+	sess.status.IsStreaming = false
+	sess.events <- pi.Event{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Done"}}`)}
+	sess.events <- pi.Event{Type: "agent_end", Raw: []byte(`{"type":"agent_end"}`)}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(messenger.edits) >= 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(messenger.edits) < 1 {
+		t.Fatalf("agent_end was not rendered: sends=%#v edits=%#v", messenger.sends, messenger.edits)
+	}
+	afterEnd := len(messenger.chatActions)
+	time.Sleep(4 * h.typingInterval)
+	if len(messenger.chatActions) != afterEnd {
+		t.Fatalf("typing continued after agent_end: before=%d after=%d actions=%#v", afterEnd, len(messenger.chatActions), messenger.chatActions)
+	}
+}
+
+func TestEventRenderingStopsTypingWhenSessionStopsWithoutAgentEnd(t *testing.T) {
+	h, messenger, sess, _ := setupHandler()
+	h.typingInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess.status.IsStreaming = true
+	h.StartEventRendering(ctx, 1)
+
+	sess.events <- pi.Event{Type: "agent_start", Raw: []byte(`{"type":"agent_start"}`)}
+	waitForRepeatedTyping(t, messenger)
+
+	sess.status.IsStreaming = false
+	time.Sleep(4 * h.typingInterval)
+	afterStop := len(messenger.chatActions)
+	time.Sleep(4 * h.typingInterval)
+	if len(messenger.chatActions) != afterStop {
+		t.Fatalf("typing continued after session stopped: before=%d after=%d actions=%#v", afterStop, len(messenger.chatActions), messenger.chatActions)
+	}
+}
+
+func waitForRepeatedTyping(t *testing.T, messenger *fakeMessenger) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(messenger.chatActions) >= 2 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("typing heartbeat did not repeat: chatActions=%#v", messenger.chatActions)
 }

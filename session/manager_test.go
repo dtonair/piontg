@@ -26,9 +26,10 @@ func (f *fakeFactory) Start(_ context.Context, opts pi.Options) (PiClient, error
 }
 
 type fakeClient struct {
-	events chan pi.Event
-	state  pi.SessionState
-	models []pi.ModelInfo
+	events   chan pi.Event
+	state    pi.SessionState
+	models   []pi.ModelInfo
+	commands []pi.CommandInfo
 
 	stopped     bool
 	closed      bool
@@ -44,9 +45,10 @@ type fakeClient struct {
 
 func newFakeClient() *fakeClient {
 	return &fakeClient{
-		events: make(chan pi.Event, 10),
-		state:  pi.SessionState{SessionFile: "/tmp/session.jsonl", SessionID: "sid"},
-		models: []pi.ModelInfo{{Provider: "anthropic", ID: "claude", ContextWindow: 200000}},
+		events:   make(chan pi.Event, 10),
+		state:    pi.SessionState{SessionFile: "/tmp/session.jsonl", SessionID: "sid"},
+		models:   []pi.ModelInfo{{Provider: "anthropic", ID: "claude", ContextWindow: 200000}},
+		commands: []pi.CommandInfo{{Name: "skill:asana-cli", Description: "Use Asana", Source: "skill", Location: "user", Path: "/skills/asana/SKILL.md"}},
 	}
 }
 
@@ -61,6 +63,9 @@ func (f *fakeClient) IsClosed() bool                                    { return
 func (f *fakeClient) GetState(context.Context) (pi.SessionState, error) { return f.state, nil }
 func (f *fakeClient) GetAvailableModels(context.Context) ([]pi.ModelInfo, error) {
 	return f.models, nil
+}
+func (f *fakeClient) GetCommands(context.Context) ([]pi.CommandInfo, error) {
+	return f.commands, nil
 }
 func (f *fakeClient) SetModel(_ context.Context, provider, modelID string) (pi.ModelInfo, error) {
 	f.setModels = append(f.setModels, provider+"/"+modelID)
@@ -114,6 +119,30 @@ func TestManagerStartsPiWithSelectedFolderPolicyAndPersistsState(t *testing.T) {
 	}
 }
 
+func TestManagerRevalidatesSelectedFolderBeforeStart(t *testing.T) {
+	ctx := context.Background()
+	m, factory, root := setupManager(t, config.StreamingFollowUp)
+	child := mkdir(t, root, "child")
+	outside := mkdir(t, filepath.Dir(root), "outside")
+
+	if err := m.SelectFolder(ctx, child); err != nil {
+		t.Fatalf("SelectFolder() error = %v", err)
+	}
+	if err := os.Remove(child); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, child); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.EnsureStarted(ctx); err == nil {
+		t.Fatal("EnsureStarted() error = nil")
+	}
+	if len(factory.opts) != 0 {
+		t.Fatalf("Pi was started with opts %#v", factory.opts)
+	}
+}
+
 func TestManagerSelectModelSetsActiveClientAndPersists(t *testing.T) {
 	ctx := context.Background()
 	m, factory, root := setupManager(t, config.StreamingFollowUp)
@@ -128,6 +157,21 @@ func TestManagerSelectModelSetsActiveClientAndPersists(t *testing.T) {
 	}
 	if status := m.Status(); status.SelectedModel != "anthropic/claude" {
 		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestManagerAvailableCommands(t *testing.T) {
+	ctx := context.Background()
+	m, _, root := setupManager(t, config.StreamingFollowUp)
+	if err := m.SelectFolder(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	commands, err := m.AvailableCommands(ctx)
+	if err != nil {
+		t.Fatalf("AvailableCommands() error = %v", err)
+	}
+	if len(commands) != 1 || commands[0].Name != "skill:asana-cli" || commands[0].Source != "skill" {
+		t.Fatalf("commands = %#v", commands)
 	}
 }
 
@@ -231,6 +275,34 @@ func TestManagerEventsUpdateStreamingState(t *testing.T) {
 	waitFor(t, func() bool { return m.Status().IsStreaming })
 	factory.clients[0].events <- pi.Event{Type: "agent_end"}
 	waitFor(t, func() bool { return !m.Status().IsStreaming })
+}
+
+func TestManagerDoesNotDropCriticalEventsWhenRenderQueueFull(t *testing.T) {
+	ctx := context.Background()
+	m, factory, root := setupManager(t, config.StreamingFollowUp)
+	if err := m.SelectFolder(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.EnsureStarted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < cap(m.events); i++ {
+		m.events <- pi.Event{Type: "queued"}
+	}
+	factory.clients[0].events <- pi.Event{Type: "agent_start"}
+	waitFor(t, func() bool { return m.Status().IsStreaming })
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-m.Events():
+			if event.Type == "agent_start" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("critical agent_start was dropped while render queue was full")
+		}
+	}
 }
 
 func TestManagerCancelsDialogExtensionUIRequests(t *testing.T) {

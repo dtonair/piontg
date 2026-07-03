@@ -12,6 +12,7 @@ type PiClient interface {
 	Stop(ctx context.Context) error
 	GetState(ctx context.Context) (pi.SessionState, error)
 	GetAvailableModels(ctx context.Context) ([]pi.ModelInfo, error)
+	GetCommands(ctx context.Context) ([]pi.CommandInfo, error)
 	SetModel(ctx context.Context, provider, modelID string) (pi.ModelInfo, error)
 	Prompt(ctx context.Context, message string) error
 	FollowUp(ctx context.Context, message string) error
