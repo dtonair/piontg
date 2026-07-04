@@ -42,5 +42,5 @@ PIONTG_PI_INTEGRATION=1 go test ./pi -run TestOptionalPiIntegrationGetState -cou
 ## Operational Notes
 
 - Pi provider credentials are expected to be configured outside piontg using normal Pi auth/API key mechanisms.
-- `state.json` stores only bot metadata: selected folder/model and Pi session file/id. Pi conversation content remains in Pi session files.
+- `state.json` stores only bot metadata: selected folder/model and Pi session file/id. Pi conversation content remains in Pi agent's default session store; piontg does not configure a custom Pi session directory.
 - If the bot crashes during an active Pi turn, the in-flight turn is lost; previous session metadata can still be reused on next startup.

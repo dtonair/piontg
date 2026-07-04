@@ -59,7 +59,6 @@ func run(args []string) error {
 			"state_dir", cfg.State.Dir,
 			"state_file", stateStore.Path(),
 			"pi_binary", cfg.Pi.Binary,
-			"pi_session_dir", cfg.Pi.SessionDir,
 			"allowed_roots", len(cfg.Folders.Roots),
 			"has_selected_folder", state.SelectedFolder != "",
 		)

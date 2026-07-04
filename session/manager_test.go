@@ -110,6 +110,9 @@ func TestManagerStartsPiWithSelectedFolderPolicyAndPersistsState(t *testing.T) {
 	if factory.opts[0].CWD != canonical(t, child) {
 		t.Fatalf("cwd = %q", factory.opts[0].CWD)
 	}
+	if factory.opts[0].SessionDir != "" {
+		t.Fatalf("session dir = %q, want Pi default", factory.opts[0].SessionDir)
+	}
 	if factory.opts[0].Trust != config.TrustNoApprove {
 		t.Fatalf("trust = %q", factory.opts[0].Trust)
 	}
@@ -359,7 +362,6 @@ func setupManager(t *testing.T, streamingBehavior string) (*Manager, *fakeFactor
 	cfg := config.Config{
 		Pi: config.PiConfig{
 			Binary:                   "pi",
-			SessionDir:               filepath.Join(dir, "sessions"),
 			DefaultTrust:             config.TrustNoApprove,
 			DefaultStreamingBehavior: streamingBehavior,
 		},

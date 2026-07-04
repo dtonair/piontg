@@ -19,7 +19,7 @@ Implemented MVP:
 - Configured parent folder roots with safe subfolder discovery
 - Pi RPC subprocess client with strict LF JSONL framing
 - Persistent local bot state
-- Pi session directory support
+- Pi default session storage with saved resume metadata
 - Folder/model pickers via inline keyboards
 - Assistant streaming renderer with Telegram-safe chunking/edit throttling
 - `/start`, `/folder`, `/model`, `/skills`, `/new`, `/abort`, `/status`, `/stop`, `/help`
@@ -69,9 +69,8 @@ Important fields:
 
 - `telegram.tokenEnv` / `telegram.token`: Telegram bot token source.
 - `telegram.allowedUserId`: the only Telegram user allowed to interact.
-- `state.dir`: local state directory for `state.json` and, by default, Pi session files.
+- `state.dir`: local state directory for piontg's `state.json` metadata.
 - `pi.binary`: Pi executable path, default `pi`.
-- `pi.sessionDir`: Pi session file directory.
 - `pi.defaultTrust`: default `no-approve`; use `approve` only for explicitly trusted roots.
 - `pi.defaultStreamingBehavior`: `follow_up` or `steer` when messages arrive while Pi is running.
 - `pi.tools` / `pi.excludeTools`: optional global Pi tool policy.
@@ -114,7 +113,7 @@ Important: Pi can run tools such as shell commands and file edits when enabled. 
 - selected model
 - Pi session file/id
 
-Pi conversation history remains in Pi's configured session directory. On restart, piontg lazily starts a new Pi RPC process for the previous folder/session when needed. In-flight turns cannot be resumed exactly after a process crash.
+Pi conversation history remains in Pi agent's default session store. On restart, piontg lazily starts a new Pi RPC process for the previous folder/session when needed. Existing absolute `sessionFile` metadata is still used for resume, but in-flight turns cannot be resumed exactly after a process crash.
 
 ## Troubleshooting
 

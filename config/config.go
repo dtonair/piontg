@@ -34,7 +34,6 @@ type TelegramConfig struct {
 
 type PiConfig struct {
 	Binary                   string   `yaml:"binary"`
-	SessionDir               string   `yaml:"sessionDir"`
 	DefaultTrust             string   `yaml:"defaultTrust"`
 	DefaultStreamingBehavior string   `yaml:"defaultStreamingBehavior"`
 	Tools                    []string `yaml:"tools"`
@@ -106,16 +105,6 @@ func (c *Config) normalize() error {
 	}
 	c.State.Dir = stateDir
 
-	if c.Pi.SessionDir == "" {
-		c.Pi.SessionDir = filepath.Join(c.State.Dir, "pi-sessions")
-	} else {
-		sessionDir, err := expandPath(c.Pi.SessionDir)
-		if err != nil {
-			return fmt.Errorf("pi.sessionDir: %w", err)
-		}
-		c.Pi.SessionDir = sessionDir
-	}
-
 	if c.Folders.MaxDepth == 0 {
 		c.Folders.MaxDepth = 4
 	}
@@ -164,9 +153,6 @@ func (c Config) Validate() error {
 	}
 	if c.Pi.DefaultStreamingBehavior != StreamingFollowUp && c.Pi.DefaultStreamingBehavior != StreamingSteer {
 		errs = append(errs, fmt.Errorf("pi.defaultStreamingBehavior must be %q or %q", StreamingFollowUp, StreamingSteer))
-	}
-	if c.Pi.SessionDir == "" {
-		errs = append(errs, errors.New("pi.sessionDir is required"))
 	}
 	if c.State.Dir == "" {
 		errs = append(errs, errors.New("state.dir is required"))

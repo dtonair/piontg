@@ -63,10 +63,6 @@ folders:
 	if cfg.State.Dir != wantStateDir {
 		t.Fatalf("State.Dir = %q, want %q", cfg.State.Dir, wantStateDir)
 	}
-	wantSessionDir := filepath.Join(wantStateDir, "pi-sessions")
-	if cfg.Pi.SessionDir != wantSessionDir {
-		t.Fatalf("SessionDir = %q, want %q", cfg.Pi.SessionDir, wantSessionDir)
-	}
 	wantRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +101,7 @@ folders:
 func TestValidateRejectsUnsafeOrIncompleteConfig(t *testing.T) {
 	cfg := Config{
 		Telegram: TelegramConfig{Token: "", AllowedUserID: 0},
-		Pi:       PiConfig{Binary: "pi", DefaultTrust: "bad", DefaultStreamingBehavior: "bad", SessionDir: "/tmp/sessions"},
+		Pi:       PiConfig{Binary: "pi", DefaultTrust: "bad", DefaultStreamingBehavior: "bad"},
 		State:    StateConfig{Dir: "/tmp/state"},
 		Folders:  FoldersConfig{MaxDepth: 0, MaxEntries: 0, Roots: []FolderRoot{{Path: "relative", Trust: "bad"}}},
 	}
@@ -139,6 +135,29 @@ folders:
 		t.Fatal("Load() error = nil")
 	}
 	if !strings.Contains(err.Error(), "field unknown not found") {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadRejectsRemovedSessionDirField(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, `
+telegram:
+  token: test-token
+  allowedUserId: 42
+pi:
+  sessionDir: ./sessions
+folders:
+  roots:
+    - path: ./
+`)
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load() error = nil")
+	}
+	if !strings.Contains(err.Error(), "field sessionDir not found") {
 		t.Fatalf("Load() error = %v", err)
 	}
 }

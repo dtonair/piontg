@@ -228,7 +228,6 @@ func (m *Manager) EnsureStarted(ctx context.Context) (PiClient, error) {
 	opts := pi.Options{
 		Binary:       m.cfg.Pi.Binary,
 		CWD:          state.SelectedFolder,
-		SessionDir:   m.cfg.Pi.SessionDir,
 		SessionFile:  state.SessionFile,
 		Model:        model,
 		Trust:        effective.Trust,
