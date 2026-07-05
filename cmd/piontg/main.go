@@ -74,7 +74,8 @@ func run(args []string) error {
 		return err
 	}
 	messenger := piontggram.NewMessengerAdapter(bot)
-	handler := piontggram.NewHandler(messenger, manager, policy, authz.New(cfg.Telegram.AllowedUserID), logger)
+	imageFetcher := piontggram.NewTelegramImageFetcher(bot)
+	handler := piontggram.NewHandlerWithImageFetcher(messenger, manager, policy, authz.New(cfg.Telegram.AllowedUserID), imageFetcher, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,19 +48,70 @@ func NewManager(cfg config.Config, policy *folders.Policy, stateStore *store.Sto
 		state:   *loaded,
 		events:  make(chan pi.Event, 256),
 	}
+	needsSave := clearNonDefaultPiSessionState(&m.state)
 	if loaded.SelectedFolder != "" {
 		canonical, effective, err := policy.Resolve(loaded.SelectedFolder)
 		if err == nil {
+			if m.state.SelectedFolder != canonical {
+				needsSave = true
+			}
 			m.state.SelectedFolder = canonical
 			m.policyForSelected = effective
 		} else {
 			m.state.SelectedFolder = ""
 			m.state.SessionFile = ""
 			m.state.SessionID = ""
-			_ = m.store.Save(&m.state)
+			needsSave = true
 		}
 	}
+	if needsSave {
+		_ = m.store.Save(&m.state)
+	}
 	return m, nil
+}
+
+func clearNonDefaultPiSessionState(state *store.State) bool {
+	if state == nil || state.SessionFile == "" {
+		return false
+	}
+	// Only resume sessions from Pi's default persistent session store. Older
+	// piontg/Pi versions may have stored paths under <state.dir>/pi-sessions or
+	// ~/.pi/agent/<project>; clearing those lets Pi create/use its current
+	// default ~/.pi/agent/sessions/<project> location instead.
+	defaultSessionsDir, err := defaultPiSessionsDir()
+	if err != nil || defaultSessionsDir == "" {
+		return false
+	}
+	if pathWithinDir(defaultSessionsDir, state.SessionFile) {
+		return false
+	}
+	state.SessionFile = ""
+	state.SessionID = ""
+	return true
+}
+
+func defaultPiSessionsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".pi", "agent", "sessions"), nil
+}
+
+func pathWithinDir(dir, path string) bool {
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(dirAbs, pathAbs)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 func (m *Manager) Events() <-chan pi.Event { return m.events }
@@ -122,21 +176,47 @@ func (m *Manager) AvailableCommands(ctx context.Context) ([]pi.CommandInfo, erro
 }
 
 func (m *Manager) Prompt(ctx context.Context, message string) error {
+	return m.PromptRequest(ctx, PromptRequest{Message: message})
+}
+
+func (m *Manager) PromptRequest(ctx context.Context, req PromptRequest) error {
 	client, err := m.EnsureStarted(ctx)
 	if err != nil {
 		return err
+	}
+	images := append([]pi.ImageContent(nil), req.Images...)
+	if len(images) > 0 {
+		state, err := client.GetState(ctx)
+		if err != nil {
+			return err
+		}
+		if state.Model != nil && len(state.Model.Input) > 0 && !modelSupportsImageInput(state.Model) {
+			return fmt.Errorf("selected model does not support image input; use /model to choose an image-capable model")
+		}
 	}
 	m.mu.Lock()
 	streaming := m.isStreaming
 	behavior := m.cfg.Pi.DefaultStreamingBehavior
 	m.mu.Unlock()
 	if !streaming {
-		return client.Prompt(ctx, message)
+		return client.Prompt(ctx, req.Message, images...)
 	}
 	if behavior == config.StreamingSteer {
-		return client.Steer(ctx, message)
+		return client.Steer(ctx, req.Message, images...)
 	}
-	return client.FollowUp(ctx, message)
+	return client.FollowUp(ctx, req.Message, images...)
+}
+
+func modelSupportsImageInput(model *pi.ModelInfo) bool {
+	if model == nil {
+		return true
+	}
+	for _, input := range model.Input {
+		if strings.EqualFold(input, "image") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) Abort(ctx context.Context) error {
@@ -147,6 +227,19 @@ func (m *Manager) Abort(ctx context.Context) error {
 		return nil
 	}
 	return client.Abort(ctx)
+}
+
+func (m *Manager) RespondExtensionUI(ctx context.Context, requestID string, payload map[string]any) error {
+	if requestID == "" {
+		return fmt.Errorf("extension UI request ID is required")
+	}
+	m.mu.Lock()
+	client := m.client
+	m.mu.Unlock()
+	if client == nil || clientClosed(client) {
+		return fmt.Errorf("pi is not started")
+	}
+	return client.RespondExtensionUI(ctx, requestID, payload)
 }
 
 func (m *Manager) NewSession(ctx context.Context) (bool, error) {
@@ -330,7 +423,7 @@ func (m *Manager) handleExtensionUIRequest(client PiClient, event pi.Event) {
 		return
 	}
 	switch request.Method {
-	case "select", "confirm", "input", "editor":
+	case "input", "editor":
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = client.RespondExtensionUI(ctx, request.ID, map[string]any{"cancelled": true})

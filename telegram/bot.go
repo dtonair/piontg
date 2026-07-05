@@ -114,7 +114,24 @@ func newTelegramHTTPClient() *http.Client {
 
 func convertUpdate(update tgbotapi.Update) (Update, bool) {
 	if update.Message != nil && update.Message.From != nil {
-		return Update{Message: &Message{ChatID: update.Message.Chat.ID, UserID: update.Message.From.ID, Text: update.Message.Text}}, true
+		msg := &Message{
+			ChatID:       update.Message.Chat.ID,
+			UserID:       update.Message.From.ID,
+			Text:         update.Message.Text,
+			Caption:      update.Message.Caption,
+			MediaGroupID: update.Message.MediaGroupID,
+		}
+		if photo, ok := largestPhoto(update.Message.Photo); ok {
+			msg.Images = []ImageRef{{
+				FileID:       photo.FileID,
+				FileUniqueID: photo.FileUniqueID,
+				Size:         int64(photo.FileSize),
+				Width:        photo.Width,
+				Height:       photo.Height,
+				Source:       "photo",
+			}}
+		}
+		return Update{Message: msg}, true
 	}
 	if update.CallbackQuery != nil && update.CallbackQuery.From != nil && update.CallbackQuery.Message != nil {
 		return Update{Callback: &Callback{
@@ -126,6 +143,26 @@ func convertUpdate(update tgbotapi.Update) (Update, bool) {
 		}}, true
 	}
 	return Update{}, false
+}
+
+func largestPhoto(photos []tgbotapi.PhotoSize) (tgbotapi.PhotoSize, bool) {
+	if len(photos) == 0 {
+		return tgbotapi.PhotoSize{}, false
+	}
+	largest := photos[0]
+	for _, photo := range photos[1:] {
+		if betterPhoto(photo, largest) {
+			largest = photo
+		}
+	}
+	return largest, true
+}
+
+func betterPhoto(candidate, current tgbotapi.PhotoSize) bool {
+	if candidate.FileSize != current.FileSize {
+		return candidate.FileSize > current.FileSize
+	}
+	return candidate.Width*candidate.Height > current.Width*current.Height
 }
 
 func toTelegramKeyboard(keyboard InlineKeyboard) tgbotapi.InlineKeyboardMarkup {

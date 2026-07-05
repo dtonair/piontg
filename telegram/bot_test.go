@@ -124,3 +124,63 @@ func TestNewTelegramHTTPClientHasTimeout(t *testing.T) {
 		t.Fatalf("Timeout = %v, want %v", client.Timeout, DefaultHTTPTimeout)
 	}
 }
+
+func TestConvertUpdateTextMessage(t *testing.T) {
+	update, ok := convertUpdate(tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 123}, From: &tgbotapi.User{ID: 42}, Text: "hello"}})
+	if !ok || update.Message == nil {
+		t.Fatalf("convertUpdate() = %#v, %v", update, ok)
+	}
+	if update.Message.ChatID != 123 || update.Message.UserID != 42 || update.Message.Text != "hello" || len(update.Message.Images) != 0 {
+		t.Fatalf("message = %#v", update.Message)
+	}
+}
+
+func TestConvertUpdatePhotoSelectsLargestByFileSize(t *testing.T) {
+	update, ok := convertUpdate(tgbotapi.Update{Message: &tgbotapi.Message{
+		Chat:         &tgbotapi.Chat{ID: 123},
+		From:         &tgbotapi.User{ID: 42},
+		Caption:      "caption",
+		MediaGroupID: "group-1",
+		Photo: []tgbotapi.PhotoSize{
+			{FileID: "small", FileUniqueID: "u1", Width: 100, Height: 100, FileSize: 200},
+			{FileID: "large", FileUniqueID: "u2", Width: 200, Height: 200, FileSize: 500},
+		},
+	}})
+	if !ok || update.Message == nil || len(update.Message.Images) != 1 {
+		t.Fatalf("convertUpdate() = %#v, %v", update, ok)
+	}
+	img := update.Message.Images[0]
+	if img.FileID != "large" || img.FileUniqueID != "u2" || img.Size != 500 || img.Width != 200 || img.Height != 200 || img.Source != "photo" {
+		t.Fatalf("image = %#v", img)
+	}
+	if update.Message.Caption != "caption" || update.Message.MediaGroupID != "group-1" {
+		t.Fatalf("message = %#v", update.Message)
+	}
+}
+
+func TestConvertUpdatePhotoUsesDimensionsAsTiebreaker(t *testing.T) {
+	update, ok := convertUpdate(tgbotapi.Update{Message: &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: 123},
+		From: &tgbotapi.User{ID: 42},
+		Photo: []tgbotapi.PhotoSize{
+			{FileID: "wide", Width: 100, Height: 50},
+			{FileID: "big", Width: 100, Height: 100},
+		},
+	}})
+	if !ok || update.Message == nil || len(update.Message.Images) != 1 {
+		t.Fatalf("convertUpdate() = %#v, %v", update, ok)
+	}
+	if update.Message.Images[0].FileID != "big" {
+		t.Fatalf("image = %#v", update.Message.Images[0])
+	}
+}
+
+func TestConvertUpdateCallbackUnchanged(t *testing.T) {
+	update, ok := convertUpdate(tgbotapi.Update{CallbackQuery: &tgbotapi.CallbackQuery{ID: "cb", From: &tgbotapi.User{ID: 42}, Message: &tgbotapi.Message{MessageID: 9, Chat: &tgbotapi.Chat{ID: 123}}, Data: "cmd:help"}})
+	if !ok || update.Callback == nil {
+		t.Fatalf("convertUpdate() = %#v, %v", update, ok)
+	}
+	if update.Callback.ID != "cb" || update.Callback.ChatID != 123 || update.Callback.UserID != 42 || update.Callback.MessageID != 9 || update.Callback.Data != "cmd:help" {
+		t.Fatalf("callback = %#v", update.Callback)
+	}
+}

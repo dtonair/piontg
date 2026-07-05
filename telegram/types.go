@@ -28,9 +28,21 @@ type Update struct {
 }
 
 type Message struct {
-	ChatID int64
-	UserID int64
-	Text   string
+	ChatID       int64
+	UserID       int64
+	Text         string
+	Caption      string
+	Images       []ImageRef
+	MediaGroupID string
+}
+
+type ImageRef struct {
+	FileID       string
+	FileUniqueID string
+	Size         int64
+	Width        int
+	Height       int
+	Source       string
 }
 
 type Callback struct {
@@ -47,11 +59,17 @@ type Session interface {
 	AvailableModels(ctx context.Context) ([]pi.ModelInfo, error)
 	AvailableCommands(ctx context.Context) ([]pi.CommandInfo, error)
 	Prompt(ctx context.Context, message string) error
+	PromptRequest(ctx context.Context, req session.PromptRequest) error
+	RespondExtensionUI(ctx context.Context, requestID string, payload map[string]any) error
 	Abort(ctx context.Context) error
 	NewSession(ctx context.Context) (bool, error)
 	Stop(ctx context.Context) error
 	Status() session.Status
 	Events() <-chan pi.Event
+}
+
+type ImageFetcher interface {
+	FetchImage(ctx context.Context, ref ImageRef) (pi.ImageContent, error)
 }
 
 type FolderPolicy interface {

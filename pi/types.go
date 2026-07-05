@@ -2,6 +2,8 @@ package pi
 
 import "encoding/json"
 
+const ImageContentTypeImage = "image"
+
 type ThinkingLevel string
 
 const (
@@ -59,6 +61,13 @@ type ModelInfo struct {
 
 type modelsData struct {
 	Models []ModelInfo `json:"models"`
+}
+
+// ImageContent is an image payload accepted by Pi prompt-like RPC commands.
+type ImageContent struct {
+	Type     string `json:"type"`
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
 }
 
 // CommandInfo describes a Pi slash command available through RPC prompt input.

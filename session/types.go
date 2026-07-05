@@ -14,13 +14,18 @@ type PiClient interface {
 	GetAvailableModels(ctx context.Context) ([]pi.ModelInfo, error)
 	GetCommands(ctx context.Context) ([]pi.CommandInfo, error)
 	SetModel(ctx context.Context, provider, modelID string) (pi.ModelInfo, error)
-	Prompt(ctx context.Context, message string) error
-	FollowUp(ctx context.Context, message string) error
-	Steer(ctx context.Context, message string) error
+	Prompt(ctx context.Context, message string, images ...pi.ImageContent) error
+	FollowUp(ctx context.Context, message string, images ...pi.ImageContent) error
+	Steer(ctx context.Context, message string, images ...pi.ImageContent) error
 	Abort(ctx context.Context) error
 	RespondExtensionUI(ctx context.Context, requestID string, payload map[string]any) error
 	NewSession(ctx context.Context) (bool, error)
 	StderrTail() string
+}
+
+type PromptRequest struct {
+	Message string
+	Images  []pi.ImageContent
 }
 
 type ClientFactory interface {

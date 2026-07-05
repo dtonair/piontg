@@ -8,7 +8,8 @@ It lets the authorized Telegram user:
 2. choose an available Pi model,
 3. start/continue a Pi RPC session,
 4. chat with Pi from Telegram,
-5. see streamed assistant text and compact tool status messages.
+5. send one Telegram photo/screenshot with an optional caption to image-capable Pi models,
+6. see streamed assistant text and compact tool status messages.
 
 ## Status
 
@@ -22,6 +23,7 @@ Implemented MVP:
 - Pi default session storage with saved resume metadata
 - Folder/model pickers via inline keyboards
 - Assistant streaming renderer with Telegram-safe chunking/edit throttling
+- One Telegram photo/screenshot per prompt, capped at 5 MiB before base64 conversion
 - `/start`, `/folder`, `/model`, `/skills`, `/new`, `/abort`, `/status`, `/stop`, `/help`
 
 ## Prerequisites
@@ -88,7 +90,7 @@ Important fields:
 - `/stop` - stop the Pi subprocess
 - `/help` - show command help
 
-After selecting a folder and model, send a normal Telegram message to prompt Pi. Pi skill commands such as `/skill:name <request>` are forwarded to Pi.
+After selecting a folder and model, send a normal Telegram message to prompt Pi. You can also send one Telegram photo/screenshot with an optional caption; photos are limited to 5 MiB and require the selected Pi model to support image input. Pi skill commands such as `/skill:name <request>` are forwarded to Pi.
 
 ## Security model
 
@@ -118,6 +120,8 @@ Pi conversation history remains in Pi agent's default session store. On restart,
 ## Troubleshooting
 
 - **No models listed**: configure Pi auth/API keys first using normal Pi setup.
+- **Image prompt rejected**: choose an image-capable model with `/model`; text-only models cannot receive Telegram photos.
+- **Image too large**: send a smaller Telegram photo/screenshot; piontg caps downloaded photos at 5 MiB.
 - **Folder missing from picker**: check `folders.maxDepth`, `folders.maxEntries`, and configured roots.
 - **Folder rejected**: the canonical path likely resolves outside allowed roots, often due to symlinks.
 - **Pi exits immediately**: run with `--dry-run`, check `pi` is on `PATH`, and try `pi --mode rpc --no-session --no-approve` manually in the target folder.

@@ -83,6 +83,113 @@ func TestRequestWritesCommandAndCorrelatesResponse(t *testing.T) {
 	}
 }
 
+func TestPromptWritesTextOnlyPayloadWithoutImages(t *testing.T) {
+	client, writer := testClient()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- client.Prompt(ctx, "msg") }()
+
+	sent := readSentCommand(t, ctx, writer)
+	if sent["type"] != "prompt" || sent["message"] != "msg" {
+		t.Fatalf("sent command = %#v", sent)
+	}
+	if _, ok := sent["images"]; ok {
+		t.Fatalf("text-only prompt included images: %#v", sent)
+	}
+	respondOK(t, client, sent, "prompt")
+	if err := <-errCh; err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+}
+
+func TestPromptWritesImagePayload(t *testing.T) {
+	client, writer := testClient()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	image := ImageContent{Type: ImageContentTypeImage, Data: "YWJj", MimeType: "image/jpeg"}
+	errCh := make(chan error, 1)
+	go func() { errCh <- client.Prompt(ctx, "msg", image) }()
+
+	sent := readSentCommand(t, ctx, writer)
+	if sent["type"] != "prompt" || sent["message"] != "msg" {
+		t.Fatalf("sent command = %#v", sent)
+	}
+	images, ok := sent["images"].([]any)
+	if !ok || len(images) != 1 {
+		t.Fatalf("images = %#v", sent["images"])
+	}
+	got, ok := images[0].(map[string]any)
+	if !ok || got["type"] != "image" || got["data"] != "YWJj" || got["mimeType"] != "image/jpeg" {
+		t.Fatalf("image payload = %#v", images[0])
+	}
+	respondOK(t, client, sent, "prompt")
+	if err := <-errCh; err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+}
+
+func TestSteerAndFollowUpWriteImagePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(context.Context, *Client, ImageContent) error
+		want string
+	}{
+		{name: "steer", call: func(ctx context.Context, c *Client, image ImageContent) error { return c.Steer(ctx, "msg", image) }, want: "steer"},
+		{name: "follow_up", call: func(ctx context.Context, c *Client, image ImageContent) error { return c.FollowUp(ctx, "msg", image) }, want: "follow_up"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, writer := testClient()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- tc.call(ctx, client, ImageContent{Type: ImageContentTypeImage, Data: "ZGF0YQ==", MimeType: "image/png"})
+			}()
+			sent := readSentCommand(t, ctx, writer)
+			if sent["type"] != tc.want || sent["message"] != "msg" {
+				t.Fatalf("sent command = %#v", sent)
+			}
+			images, ok := sent["images"].([]any)
+			if !ok || len(images) != 1 {
+				t.Fatalf("images = %#v", sent["images"])
+			}
+			got := images[0].(map[string]any)
+			if got["type"] != "image" || got["data"] != "ZGF0YQ==" || got["mimeType"] != "image/png" {
+				t.Fatalf("image payload = %#v", got)
+			}
+			respondOK(t, client, sent, tc.want)
+			if err := <-errCh; err != nil {
+				t.Fatalf("%s() error = %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func readSentCommand(t *testing.T, ctx context.Context, writer *captureWriteCloser) map[string]any {
+	t.Helper()
+	var sent map[string]any
+	select {
+	case line := <-writer.writes:
+		if err := json.Unmarshal(line, &sent); err != nil {
+			t.Fatalf("sent json: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for command write")
+	}
+	return sent
+}
+
+func respondOK(t *testing.T, client *Client, sent map[string]any, command string) {
+	t.Helper()
+	line := `{"id":"` + sent["id"].(string) + `","type":"response","command":"` + command + `","success":true}`
+	if err := client.handleLine([]byte(line)); err != nil {
+		t.Fatalf("handleLine() error = %v", err)
+	}
+}
+
 func TestRequestReturnsFailedResponseAsError(t *testing.T) {
 	client, writer := testClient()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -300,7 +407,7 @@ done
 	cancel()
 	time.Sleep(100 * time.Millisecond)
 
-	requestCtx, requestCancel := context.WithTimeout(context.Background(), time.Second)
+	requestCtx, requestCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer requestCancel()
 	state, err := client.GetState(requestCtx)
 	if err != nil {

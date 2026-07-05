@@ -144,19 +144,27 @@ func (c *Client) SetModel(ctx context.Context, provider, modelID string) (ModelI
 	return out, err
 }
 
-func (c *Client) Prompt(ctx context.Context, message string) error {
-	_, err := c.Request(ctx, "prompt", map[string]any{"message": message})
+func (c *Client) Prompt(ctx context.Context, message string, images ...ImageContent) error {
+	_, err := c.Request(ctx, "prompt", promptPayload(message, images))
 	return err
 }
 
-func (c *Client) FollowUp(ctx context.Context, message string) error {
-	_, err := c.Request(ctx, "follow_up", map[string]any{"message": message})
+func (c *Client) FollowUp(ctx context.Context, message string, images ...ImageContent) error {
+	_, err := c.Request(ctx, "follow_up", promptPayload(message, images))
 	return err
 }
 
-func (c *Client) Steer(ctx context.Context, message string) error {
-	_, err := c.Request(ctx, "steer", map[string]any{"message": message})
+func (c *Client) Steer(ctx context.Context, message string, images ...ImageContent) error {
+	_, err := c.Request(ctx, "steer", promptPayload(message, images))
 	return err
+}
+
+func promptPayload(message string, images []ImageContent) map[string]any {
+	payload := map[string]any{"message": message}
+	if len(images) > 0 {
+		payload["images"] = images
+	}
+	return payload
 }
 
 func (c *Client) Abort(ctx context.Context) error {
