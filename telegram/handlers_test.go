@@ -851,12 +851,15 @@ func TestEventRendering(t *testing.T) {
 	sess.events <- pi.Event{Type: "agent_end", Raw: []byte(`{"type":"agent_end"}`)}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if len(messenger.sends) >= 1 && len(messenger.edits) >= 1 {
+		if len(messenger.sends) >= 1 {
+			if len(messenger.edits) != 0 {
+				t.Fatalf("render edited unexpectedly: sends=%#v edits=%#v", messenger.sends, messenger.edits)
+			}
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("render did not send/edit: sends=%#v edits=%#v", messenger.sends, messenger.edits)
+	t.Fatalf("render did not send: sends=%#v edits=%#v", messenger.sends, messenger.edits)
 }
 
 func TestEventRenderingKeepsTypingUntilAgentEnd(t *testing.T) {
@@ -875,13 +878,16 @@ func TestEventRenderingKeepsTypingUntilAgentEnd(t *testing.T) {
 	sess.events <- pi.Event{Type: "agent_end", Raw: []byte(`{"type":"agent_end"}`)}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if len(messenger.edits) >= 1 {
+		if len(messenger.sends) >= 1 {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if len(messenger.edits) < 1 {
+	if len(messenger.sends) < 1 {
 		t.Fatalf("agent_end was not rendered: sends=%#v edits=%#v", messenger.sends, messenger.edits)
+	}
+	if len(messenger.edits) != 0 {
+		t.Fatalf("render edited unexpectedly: sends=%#v edits=%#v", messenger.sends, messenger.edits)
 	}
 	afterEnd := len(messenger.chatActions)
 	time.Sleep(4 * h.typingInterval)

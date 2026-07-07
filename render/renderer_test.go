@@ -42,11 +42,9 @@ func (f *fakeSink) SendTyping(context.Context) error {
 	return nil
 }
 
-func TestRendererThrottlesEditsAndFlushesFinalText(t *testing.T) {
+func TestRendererBuffersTextUntilFlushWithoutEdits(t *testing.T) {
 	sink := &fakeSink{}
 	r := New(sink)
-	now := time.Unix(0, 0)
-	r.SetClock(func() time.Time { return now })
 	r.SetLimits(100, time.Second)
 	ctx := context.Background()
 
@@ -56,24 +54,20 @@ func TestRendererThrottlesEditsAndFlushesFinalText(t *testing.T) {
 	if err := r.AppendText(ctx, "lo"); err != nil {
 		t.Fatal(err)
 	}
-	if len(sink.sends) != 1 || sink.sends[0] != "hel" {
-		t.Fatalf("sends = %#v", sink.sends)
+	if len(sink.sends) != 0 {
+		t.Fatalf("sends before flush = %#v", sink.sends)
 	}
 	if len(sink.edits) != 0 {
-		t.Fatalf("edits before throttle = %#v", sink.edits)
-	}
-	now = now.Add(time.Second)
-	if err := r.AppendText(ctx, "!"); err != nil {
-		t.Fatal(err)
-	}
-	if len(sink.edits) != 1 || sink.edits[0].text != "hello!" {
-		t.Fatalf("edits = %#v", sink.edits)
+		t.Fatalf("edits before flush = %#v", sink.edits)
 	}
 	if err := r.Flush(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(sink.edits) != 2 || sink.edits[1].text != "hello!" {
-		t.Fatalf("flush edits = %#v", sink.edits)
+	if len(sink.sends) != 1 || sink.sends[0] != "hello" {
+		t.Fatalf("sends = %#v", sink.sends)
+	}
+	if len(sink.edits) != 0 {
+		t.Fatalf("edits = %#v", sink.edits)
 	}
 }
 
@@ -95,10 +89,13 @@ func TestRendererChunksLongMessages(t *testing.T) {
 	if sink.sends[0] != "hello" || sink.sends[1] != " worl" || sink.sends[2] != "d" {
 		t.Fatalf("sends = %#v", sink.sends)
 	}
-	for _, edit := range sink.edits {
-		if len([]rune(edit.text)) > 5 {
-			t.Fatalf("edit exceeds limit: %#v", edit)
+	for _, send := range sink.sends {
+		if len([]rune(send)) > 5 {
+			t.Fatalf("send exceeds limit: %#v", send)
 		}
+	}
+	if len(sink.edits) != 0 {
+		t.Fatalf("edits = %#v", sink.edits)
 	}
 }
 
@@ -127,6 +124,53 @@ func TestRendererHandlesMessageUpdateAndToolEvents(t *testing.T) {
 	}
 	if !strings.Contains(sink.sends[1], "🔧 bash") || !strings.Contains(sink.sends[1], "```bash\ngo test ./...\n```") {
 		t.Fatalf("tool start = %q", sink.sends[1])
+	}
+}
+
+func TestRendererFlushesWhenMessageIDChanges(t *testing.T) {
+	sink := &fakeSink{}
+	r := New(sink)
+	r.SetLimits(100, 0)
+	ctx := context.Background()
+
+	events := []pi.Event{
+		{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","messageId":"m1","delta":"First"}}`)},
+		{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","messageId":"m2","delta":"Second"}}`)},
+		{Type: "agent_end", Raw: []byte(`{"type":"agent_end"}`)},
+	}
+	for _, event := range events {
+		if err := r.HandleEvent(ctx, event); err != nil {
+			t.Fatalf("HandleEvent(%s) error = %v", event.Type, err)
+		}
+	}
+	if len(sink.sends) != 2 || sink.sends[0] != "First" || sink.sends[1] != "Second" {
+		t.Fatalf("sends = %#v", sink.sends)
+	}
+	if len(sink.edits) != 0 {
+		t.Fatalf("edits = %#v", sink.edits)
+	}
+}
+
+func TestRendererFlushesOnMessageBoundaryEvent(t *testing.T) {
+	sink := &fakeSink{}
+	r := New(sink)
+	r.SetLimits(100, 0)
+	ctx := context.Background()
+
+	events := []pi.Event{
+		{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Done"}}`)},
+		{Type: "message_update", Raw: []byte(`{"type":"message_update","assistantMessageEvent":{"type":"message_end"}}`)},
+	}
+	for _, event := range events {
+		if err := r.HandleEvent(ctx, event); err != nil {
+			t.Fatalf("HandleEvent(%s) error = %v", event.Type, err)
+		}
+	}
+	if len(sink.sends) != 1 || sink.sends[0] != "Done" {
+		t.Fatalf("sends = %#v", sink.sends)
+	}
+	if len(sink.edits) != 0 {
+		t.Fatalf("edits = %#v", sink.edits)
 	}
 }
 
@@ -209,7 +253,7 @@ func TestRendererOnlyShowsToolEndWhenFailed(t *testing.T) {
 	}
 }
 
-func TestRendererFallsBackToSendWhenEditFails(t *testing.T) {
+func TestRendererDoesNotEditWhenEditFails(t *testing.T) {
 	sink := &fakeSink{edErr: errors.New("edit failed")}
 	r := New(sink)
 	r.SetLimits(100, 0)
@@ -220,8 +264,14 @@ func TestRendererFallsBackToSendWhenEditFails(t *testing.T) {
 	if err := r.AppendText(ctx, "b"); err != nil {
 		t.Fatal(err)
 	}
-	if len(sink.sends) != 2 || sink.sends[1] != "ab" {
+	if err := r.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.sends) != 1 || sink.sends[0] != "ab" {
 		t.Fatalf("sends = %#v", sink.sends)
+	}
+	if len(sink.edits) != 0 {
+		t.Fatalf("edits = %#v", sink.edits)
 	}
 }
 

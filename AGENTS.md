@@ -20,7 +20,7 @@ PIONTG_PI_INTEGRATION=1 go test ./pi -run TestOptionalPiIntegrationGetState -cou
 - `pisessions`: Pi JSONL session-store discovery, header/summary parsing, allowed-root filtering hooks.
 - `pi`: Pi RPC subprocess client, strict LF JSONL reader, request/response correlation, event routing, stderr tail capture.
 - `session`: single active Pi session manager; owns selected folder/model, Pi lifecycle, state persistence, prompt routing.
-- `render`: Telegram-agnostic assistant/tool renderer with message chunking and edit throttling.
+- `render`: Telegram-agnostic assistant/tool renderer with per-message buffering and rune-safe chunking.
 - `telegram`: Telegram Bot API adapter, command/callback handlers, event rendering bridge.
 - `authz`: single authorized Telegram user guard.
 
@@ -31,7 +31,7 @@ PIONTG_PI_INTEGRATION=1 go test ./pi -run TestOptionalPiIntegrationGetState -cou
 - Pi project trust defaults to `--no-approve`; per-root `approve` must be explicit in config.
 - Pi tool policy is configurable globally and per root. Empty tool lists mean Pi defaults.
 - Pi RPC framing must split only on byte `\n`. Do not replace with generic line readers that split on Unicode separators.
-- Telegram rendering should avoid flooding: batch assistant deltas using edit throttling and split messages by rune count.
+- Telegram rendering should avoid flooding without edits: buffer assistant text deltas until a message boundary/tool boundary/turn end, then send rune-safe chunks. Do not stream assistant text by editing Telegram messages.
 - Telegram session resume lists only Pi JSONL sessions whose header `cwd` resolves inside configured allowed roots; callbacks use opaque tokens and resume revalidates the file before restarting Pi with `--session`.
 - Pi extension UI dialog requests are currently cancelled by default in `session` so the RPC process does not block. Rich Telegram UI handling can be added later.
 
