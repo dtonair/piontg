@@ -22,8 +22,10 @@ pi:
 
 folders:
   # Folder picker includes each root and descendants up to maxDepth, capped by maxEntries.
+  # Set gitReposOnly to true to show only folders containing .git metadata.
   maxDepth: 4
   maxEntries: 200
+  gitReposOnly: false
   roots:
     - name: "code"
       path: "~/code"

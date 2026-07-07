@@ -41,9 +41,10 @@ type PiConfig struct {
 }
 
 type FoldersConfig struct {
-	MaxDepth   int          `yaml:"maxDepth"`
-	MaxEntries int          `yaml:"maxEntries"`
-	Roots      []FolderRoot `yaml:"roots"`
+	MaxDepth     int          `yaml:"maxDepth"`
+	MaxEntries   int          `yaml:"maxEntries"`
+	GitReposOnly bool         `yaml:"gitReposOnly"`
+	Roots        []FolderRoot `yaml:"roots"`
 }
 
 type FolderRoot struct {

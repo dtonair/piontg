@@ -51,6 +51,9 @@ folders:
 	if cfg.Folders.MaxDepth != 4 || cfg.Folders.MaxEntries != 200 {
 		t.Fatalf("folder defaults = depth %d entries %d", cfg.Folders.MaxDepth, cfg.Folders.MaxEntries)
 	}
+	if cfg.Folders.GitReposOnly {
+		t.Fatal("Folders.GitReposOnly default = true")
+	}
 	wantStateDir, err := filepath.EvalSymlinks(filepath.Join(dir, "state"))
 	if err != nil {
 		// The directory does not exist yet; canonicalize the parent for platforms like macOS /var -> /private/var.
@@ -72,6 +75,29 @@ folders:
 	}
 	if cfg.Folders.Roots[0].Trust != TrustNoApprove {
 		t.Fatalf("root trust = %q", cfg.Folders.Roots[0].Trust)
+	}
+}
+
+func TestLoadParsesGitReposOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, `
+telegram:
+  token: test-token
+  allowedUserId: 42
+pi: {}
+folders:
+  gitReposOnly: true
+  roots:
+    - path: ./
+`)
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Folders.GitReposOnly {
+		t.Fatal("Folders.GitReposOnly = false")
 	}
 }
 

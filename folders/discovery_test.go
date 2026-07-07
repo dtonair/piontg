@@ -79,6 +79,51 @@ func TestDiscoverSkipsGitNonDirectoriesBrokenLinksAndEscapingSymlinks(t *testing
 	}
 }
 
+func TestDiscoverGitReposOnlyShowsGitReposWhileTraversingParents(t *testing.T) {
+	dir := t.TempDir()
+	root := mkdir(t, dir, "root")
+	app := mkdir(t, root, "app")
+	mkdir(t, app, ".git")
+	group := mkdir(t, root, "group")
+	project := mkdir(t, group, "project")
+	if err := os.WriteFile(filepath.Join(project, ".git"), []byte("gitdir: ../.git/worktrees/project\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mkdir(t, root, "not-a-repo")
+	policy := mustPolicy(t, root)
+	policy.gitReposOnly = true
+
+	choices, err := policy.Discover()
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	labels := labelsOf(choices)
+	want := []string{"root/app", "root/group/project"}
+	if !reflect.DeepEqual(labels, want) {
+		t.Fatalf("labels = %#v, want %#v", labels, want)
+	}
+}
+
+func TestDiscoverGitReposOnlyIncludesRootRepo(t *testing.T) {
+	dir := t.TempDir()
+	root := mkdir(t, dir, "root")
+	mkdir(t, root, ".git")
+	child := mkdir(t, root, "child")
+	mkdir(t, child, ".git")
+	policy := mustPolicy(t, root)
+	policy.gitReposOnly = true
+
+	choices, err := policy.Discover()
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	labels := labelsOf(choices)
+	want := []string{"root", "root/child"}
+	if !reflect.DeepEqual(labels, want) {
+		t.Fatalf("labels = %#v, want %#v", labels, want)
+	}
+}
+
 func TestResolveTokenPerformsFreshValidation(t *testing.T) {
 	dir := t.TempDir()
 	root := mkdir(t, dir, "root")

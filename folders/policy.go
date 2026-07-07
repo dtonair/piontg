@@ -31,9 +31,10 @@ type Root struct {
 
 // Policy validates and resolves user-selected folders against configured roots.
 type Policy struct {
-	roots      []Root
-	maxDepth   int
-	maxEntries int
+	roots        []Root
+	maxDepth     int
+	maxEntries   int
+	gitReposOnly bool
 }
 
 func NewPolicy(cfg config.Config) (*Policy, error) {
@@ -55,7 +56,7 @@ func NewPolicy(cfg config.Config) (*Policy, error) {
 	if len(roots) == 0 {
 		return nil, errors.New("at least one allowed root is required")
 	}
-	return &Policy{roots: roots, maxDepth: cfg.Folders.MaxDepth, maxEntries: cfg.Folders.MaxEntries}, nil
+	return &Policy{roots: roots, maxDepth: cfg.Folders.MaxDepth, maxEntries: cfg.Folders.MaxEntries, gitReposOnly: cfg.Folders.GitReposOnly}, nil
 }
 
 func (p *Policy) Roots() []Root {

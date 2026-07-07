@@ -79,6 +79,7 @@ Important fields:
 - `pi.defaultStreamingBehavior`: `follow_up` or `steer` when messages arrive while Pi is running.
 - `pi.tools` / `pi.excludeTools`: optional global Pi tool policy.
 - `folders.roots`: parent folders whose descendants may be selected from Telegram.
+- `folders.gitReposOnly`: optional; when `true`, `/folder` shows only descendants containing `.git` metadata.
 
 ## Telegram commands
 
@@ -129,7 +130,7 @@ Pi conversation history remains in Pi agent's default session store. On restart,
 - **No models listed**: configure Pi auth/API keys first using normal Pi setup.
 - **Image prompt rejected**: choose an image-capable model with `/model`; text-only models cannot receive Telegram photos.
 - **Image too large**: send a smaller Telegram photo/screenshot; piontg caps downloaded photos at 5 MiB.
-- **Folder missing from picker**: check `folders.maxDepth`, `folders.maxEntries`, and configured roots.
+- **Folder missing from picker**: check `folders.maxDepth`, `folders.maxEntries`, configured roots, and whether `folders.gitReposOnly` requires the folder to contain `.git` metadata.
 - **Session missing from `/sessions`**: the session's recorded cwd may be deleted, outside `folders.roots`, or in a different Pi session directory.
 - **Folder rejected**: the canonical path likely resolves outside allowed roots, often due to symlinks.
 - **Pi exits immediately**: run with `--dry-run`, check `pi` is on `PATH`, and try `pi --mode rpc --no-session --no-approve` manually in the target folder.

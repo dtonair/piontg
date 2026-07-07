@@ -17,8 +17,10 @@ type Choice struct {
 	Depth     int
 }
 
-// Discover returns a bounded, deterministic list of selectable folders. Each
-// configured root is included at depth 0, followed by descendants up to maxDepth.
+// Discover returns a bounded, deterministic list of selectable folders. By
+// default, each configured root is included at depth 0, followed by descendants
+// up to maxDepth. When gitReposOnly is enabled, only folders with .git metadata
+// are returned while traversal still walks non-repo parent folders.
 func (p *Policy) Discover() ([]Choice, error) {
 	if p.maxEntries < 1 {
 		return nil, fmt.Errorf("maxEntries must be at least 1")
@@ -57,9 +59,12 @@ func (p *Policy) ResolveToken(token string) (string, EffectivePolicy, error) {
 }
 
 func (p *Policy) discoverRoot(root Root, remaining int) ([]Choice, error) {
-	entries := []Choice{p.choiceFor(root, root.Path, 0)}
-	if remaining <= 1 || p.maxDepth == 0 {
-		return entries[:min(remaining, len(entries))], nil
+	entries := make([]Choice, 0, remaining)
+	if p.shouldInclude(root.Path) {
+		entries = append(entries, p.choiceFor(root, root.Path, 0))
+	}
+	if len(entries) >= remaining || p.maxDepth == 0 {
+		return entries, nil
 	}
 
 	type queueItem struct {
@@ -67,6 +72,7 @@ func (p *Policy) discoverRoot(root Root, remaining int) ([]Choice, error) {
 		depth int
 	}
 	queue := []queueItem{{path: root.Path, depth: 0}}
+	visited := map[string]struct{}{root.Path: {}}
 	for len(queue) > 0 && len(entries) < remaining {
 		current := queue[0]
 		queue = queue[1:]
@@ -79,15 +85,34 @@ func (p *Policy) discoverRoot(root Root, remaining int) ([]Choice, error) {
 			return nil, err
 		}
 		for _, child := range children {
-			if len(entries) >= remaining {
-				break
+			if _, ok := visited[child]; ok {
+				continue
 			}
+			visited[child] = struct{}{}
+
 			depth := current.depth + 1
-			entries = append(entries, p.choiceFor(root, child, depth))
+			if p.shouldInclude(child) {
+				if len(entries) >= remaining {
+					break
+				}
+				entries = append(entries, p.choiceFor(root, child, depth))
+			}
 			queue = append(queue, queueItem{path: child, depth: depth})
 		}
 	}
 	return entries, nil
+}
+
+func (p *Policy) shouldInclude(path string) bool {
+	return !p.gitReposOnly || hasGitMetadata(path)
+}
+
+func hasGitMetadata(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".git"))
+	if err != nil {
+		return false
+	}
+	return info.IsDir() || info.Mode().IsRegular()
 }
 
 func safeChildDirs(parent, root string) ([]string, error) {
