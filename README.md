@@ -7,9 +7,10 @@ It lets the authorized Telegram user:
 1. choose a configured project folder,
 2. choose an available Pi model,
 3. start/continue a Pi RPC session,
-4. chat with Pi from Telegram,
-5. send one Telegram photo/screenshot with an optional caption to image-capable Pi models,
-6. see streamed assistant text and compact tool status messages.
+4. browse/resume existing Pi sessions under allowed folders,
+5. chat with Pi from Telegram,
+6. send one Telegram photo/screenshot with an optional caption to image-capable Pi models,
+7. see streamed assistant text and compact tool status messages.
 
 ## Status
 
@@ -21,10 +22,11 @@ Implemented MVP:
 - Pi RPC subprocess client with strict LF JSONL framing
 - Persistent local bot state
 - Pi default session storage with saved resume metadata
-- Folder/model pickers via inline keyboards
+- Telegram session browser/resume for allowed Pi JSONL sessions
+- Folder/model/session pickers via inline keyboards
 - Assistant streaming renderer with Telegram-safe chunking/edit throttling
 - One Telegram photo/screenshot per prompt, capped at 5 MiB before base64 conversion
-- `/start`, `/folder`, `/model`, `/skills`, `/new`, `/abort`, `/status`, `/stop`, `/help`
+- `/start`, `/menu`, `/folder`, `/model`, `/skills`, `/sessions`, `/resume`, `/new`, `/abort`, `/status`, `/stop`, `/help`
 
 ## Prerequisites
 
@@ -81,9 +83,12 @@ Important fields:
 ## Telegram commands
 
 - `/start` - show current state and next action
+- `/menu` - show quick action buttons for common commands
 - `/folder` - choose a configured folder/subfolder
 - `/model` - choose a Pi model from `get_available_models`
 - `/skills` - show Pi skills from `get_commands`
+- `/sessions` - list and resume existing Pi sessions under allowed folders
+- `/resume` - alias for `/sessions`
 - `/new` - start a new Pi session in the selected folder
 - `/abort` - abort the current Pi turn
 - `/status` - show folder/model/session/streaming state
@@ -117,12 +122,15 @@ Important: Pi can run tools such as shell commands and file edits when enabled. 
 
 Pi conversation history remains in Pi agent's default session store. On restart, piontg lazily starts a new Pi RPC process for the previous folder/session when needed. Existing absolute `sessionFile` metadata is still used for resume, but in-flight turns cannot be resumed exactly after a process crash.
 
+`/sessions` scans Pi's effective session store (`PI_CODING_AGENT_SESSION_DIR` when set, otherwise `~/.pi/agent/sessions`) and only shows sessions whose recorded working directory is inside configured `folders.roots`.
+
 ## Troubleshooting
 
 - **No models listed**: configure Pi auth/API keys first using normal Pi setup.
 - **Image prompt rejected**: choose an image-capable model with `/model`; text-only models cannot receive Telegram photos.
 - **Image too large**: send a smaller Telegram photo/screenshot; piontg caps downloaded photos at 5 MiB.
 - **Folder missing from picker**: check `folders.maxDepth`, `folders.maxEntries`, and configured roots.
+- **Session missing from `/sessions`**: the session's recorded cwd may be deleted, outside `folders.roots`, or in a different Pi session directory.
 - **Folder rejected**: the canonical path likely resolves outside allowed roots, often due to symlinks.
 - **Pi exits immediately**: run with `--dry-run`, check `pi` is on `PATH`, and try `pi --mode rpc --no-session --no-approve` manually in the target folder.
 - **Telegram messages stop updating**: Telegram edit limits may be hit; renderer falls back to new messages when edits fail.
@@ -133,6 +141,7 @@ Pi conversation history remains in Pi agent's default session store. On restart,
 - `config`: YAML/env config loading and validation
 - `store`: atomic JSON state persistence
 - `folders`: folder allowlist policy and discovery
+- `pisessions`: Pi JSONL session discovery and summary parsing
 - `pi`: Pi RPC subprocess client
 - `session`: single active Pi session orchestration
 - `render`: Telegram-safe rendering/chunking

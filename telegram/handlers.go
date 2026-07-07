@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ const (
 	callbackFolderPrefix  = "folder:"
 	callbackModelPrefix   = "model:"
 	callbackSkillPrefix   = "skill:"
+	callbackSessionPrefix = "sess:"
 	callbackCommandPrefix = "cmd:"
 	callbackUIPrefix      = "ui:"
 
@@ -46,6 +48,7 @@ type Handler struct {
 	mu             sync.Mutex
 	modelTokens    map[string]pi.ModelInfo
 	commandTokens  map[string]pi.CommandInfo
+	sessionTokens  map[string]session.SessionSummary
 	uiTokens       map[string]pendingExtensionUI
 	uiHandled      map[string]time.Time
 	typingInterval time.Duration
@@ -81,7 +84,7 @@ func NewHandlerWithImageFetcher(messenger Messenger, sess Session, folderPolicy 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{messenger: messenger, session: sess, folders: folderPolicy, auth: authorizer, imageFetcher: imageFetcher, logger: logger, modelTokens: make(map[string]pi.ModelInfo), commandTokens: make(map[string]pi.CommandInfo), uiTokens: make(map[string]pendingExtensionUI), uiHandled: make(map[string]time.Time), typingInterval: render.DefaultTypingInterval}
+	return &Handler{messenger: messenger, session: sess, folders: folderPolicy, auth: authorizer, imageFetcher: imageFetcher, logger: logger, modelTokens: make(map[string]pi.ModelInfo), commandTokens: make(map[string]pi.CommandInfo), sessionTokens: make(map[string]session.SessionSummary), uiTokens: make(map[string]pendingExtensionUI), uiHandled: make(map[string]time.Time), typingInterval: render.DefaultTypingInterval}
 }
 
 func (h *Handler) HandleUpdate(ctx context.Context, update Update) error {
@@ -206,12 +209,16 @@ func (h *Handler) handleCommand(ctx context.Context, chatID int64, command strin
 	case "help":
 		_, err := h.messenger.SendMessage(ctx, chatID, helpText(), nil)
 		return err
+	case "menu":
+		return h.sendQuickMenu(ctx, chatID)
 	case "folder":
 		return h.sendFolderPicker(ctx, chatID)
 	case "model":
 		return h.sendModelPicker(ctx, chatID)
 	case "skills":
 		return h.sendSkillPicker(ctx, chatID)
+	case "sessions", "resume":
+		return h.sendSessionPicker(ctx, chatID)
 	case "new":
 		cancelled, err := h.session.NewSession(ctx)
 		if err != nil {
@@ -285,6 +292,22 @@ func (h *Handler) handleCallback(ctx context.Context, cb Callback) error {
 		_ = h.messenger.AnswerCallback(ctx, cb.ID, "Skill details")
 		_, err := h.messenger.SendMessage(ctx, cb.ChatID, formatSkillCommandDetails(command), nil)
 		return err
+	case strings.HasPrefix(data, callbackSessionPrefix):
+		token := strings.TrimPrefix(data, callbackSessionPrefix)
+		summary, ok := h.lookupSession(token)
+		if !ok {
+			_ = h.messenger.AnswerCallback(ctx, cb.ID, "Session list expired")
+			_, err := h.messenger.SendMessage(ctx, cb.ChatID, "Session list expired. Run /sessions again.", nil)
+			return err
+		}
+		if err := h.session.ResumeSession(ctx, summary.File); err != nil {
+			_ = h.messenger.AnswerCallback(ctx, cb.ID, "Resume failed")
+			_, _ = h.messenger.SendMessage(ctx, cb.ChatID, "Could not resume session: "+err.Error(), nil)
+			return err
+		}
+		_ = h.messenger.AnswerCallback(ctx, cb.ID, "Session resumed")
+		_, err := h.messenger.SendMessage(ctx, cb.ChatID, "Resumed Pi session:\n"+formatSessionSummary(summary), nil)
+		return err
 	case strings.HasPrefix(data, callbackModelPrefix):
 		token := strings.TrimPrefix(data, callbackModelPrefix)
 		model, ok := h.lookupModel(token)
@@ -345,9 +368,38 @@ func (h *Handler) sendStart(ctx context.Context, chatID int64) error {
 		{Text: "Choose model", Data: "cmd:model"},
 	}, {
 		{Text: "Show skills", Data: "cmd:skills"},
+		{Text: "Resume session", Data: "cmd:sessions"},
+	}, {
+		{Text: "Quick menu", Data: "cmd:menu"},
 	}}
 
-	_, err := h.messenger.SendMessage(ctx, chatID, "Pi Telegram bot ready.\n\n"+formatStatus(h.session.Status())+"\n\nUse /folder to begin.", keyboard)
+	_, err := h.messenger.SendMessage(ctx, chatID, "Pi Telegram bot ready.\n\n"+formatStatus(h.session.Status())+"\n\nUse /folder to begin, or /menu for quick actions.", keyboard)
+	return err
+}
+
+func (h *Handler) sendQuickMenu(ctx context.Context, chatID int64) error {
+	keyboard := InlineKeyboard{
+		{
+			{Text: "Status", Data: "cmd:status"},
+			{Text: "Help", Data: "cmd:help"},
+		},
+		{
+			{Text: "Folder", Data: "cmd:folder"},
+			{Text: "Model", Data: "cmd:model"},
+		},
+		{
+			{Text: "Skills", Data: "cmd:skills"},
+			{Text: "Sessions", Data: "cmd:sessions"},
+		},
+		{
+			{Text: "New session", Data: "cmd:new"},
+		},
+		{
+			{Text: "Abort", Data: "cmd:abort"},
+			{Text: "Stop", Data: "cmd:stop"},
+		},
+	}
+	_, err := h.messenger.SendMessage(ctx, chatID, "Quick actions:", keyboard)
 	return err
 }
 
@@ -396,6 +448,29 @@ func (h *Handler) sendModelPicker(ctx context.Context, chatID int64) error {
 	}
 	h.mu.Unlock()
 	_, err = h.messenger.SendMessage(ctx, chatID, "Choose a model:", keyboard)
+	return err
+}
+
+func (h *Handler) sendSessionPicker(ctx context.Context, chatID int64) error {
+	sessions, err := h.session.ListSessions(ctx)
+	if err != nil {
+		_, _ = h.messenger.SendMessage(ctx, chatID, "Could not list sessions: "+err.Error(), nil)
+		return err
+	}
+	if len(sessions) == 0 {
+		_, err := h.messenger.SendMessage(ctx, chatID, "No Pi sessions found under allowed folders.", nil)
+		return err
+	}
+	keyboard := make(InlineKeyboard, 0, len(sessions))
+	h.mu.Lock()
+	h.sessionTokens = make(map[string]session.SessionSummary, len(sessions))
+	for _, summary := range sessions {
+		token := sessionToken(summary)
+		h.sessionTokens[token] = summary
+		keyboard = append(keyboard, []Button{{Text: truncate(formatSessionButtonLabel(summary), 60), Data: callbackSessionPrefix + token}})
+	}
+	h.mu.Unlock()
+	_, err = h.messenger.SendMessage(ctx, chatID, fmt.Sprintf("Choose a Pi session to resume (showing %d):", len(sessions)), keyboard)
 	return err
 }
 
@@ -775,6 +850,13 @@ func (h *Handler) lookupCommand(token string) (pi.CommandInfo, bool) {
 	return command, ok
 }
 
+func (h *Handler) lookupSession(token string) (session.SessionSummary, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	summary, ok := h.sessionTokens[token]
+	return summary, ok
+}
+
 func commandName(text string) string {
 	name := strings.TrimPrefix(strings.Fields(text)[0], "/")
 	if idx := strings.IndexByte(name, '@'); idx >= 0 {
@@ -791,6 +873,54 @@ func modelToken(model pi.ModelInfo) string {
 func commandToken(command pi.CommandInfo) string {
 	sum := sha256.Sum256([]byte(command.Name + "\x00" + command.Path))
 	return base64.RawURLEncoding.EncodeToString(sum[:])[:16]
+}
+
+func sessionToken(summary session.SessionSummary) string {
+	sum := sha256.Sum256([]byte(summary.File + "\x00" + summary.ID))
+	return base64.RawURLEncoding.EncodeToString(sum[:])[:16]
+}
+
+func formatSessionButtonLabel(summary session.SessionSummary) string {
+	folder := filepath.Base(summary.CWD)
+	if folder == "." || folder == string(filepath.Separator) || folder == "" {
+		folder = summary.CWD
+	}
+	desc := strings.TrimSpace(summary.Name)
+	if desc == "" {
+		desc = strings.TrimSpace(summary.Preview)
+	}
+	if desc == "" {
+		desc = sessionIDPrefix(summary.ID)
+	}
+	when := "unknown"
+	if !summary.LastAt.IsZero() {
+		when = summary.LastAt.Local().Format("2006-01-02")
+	}
+	return folder + " · " + desc + " · " + when
+}
+
+func formatSessionSummary(summary session.SessionSummary) string {
+	lines := []string{
+		"Folder: " + emptyDefault(summary.CWD, "(unknown)"),
+		"Session: " + emptyDefault(summary.ID, "(unknown)"),
+	}
+	if summary.Name != "" {
+		lines = append(lines, "Name: "+summary.Name)
+	}
+	if summary.Preview != "" {
+		lines = append(lines, "Preview: "+truncate(summary.Preview, 120))
+	}
+	if !summary.LastAt.IsZero() {
+		lines = append(lines, "Last activity: "+summary.LastAt.Local().Format(time.RFC3339))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func sessionIDPrefix(id string) string {
+	if id == "" {
+		return "(unknown)"
+	}
+	return truncate(id, 8)
 }
 
 func formatSkillCommandDetails(command pi.CommandInfo) string {
@@ -827,9 +957,12 @@ func helpText() string {
 	return strings.Join([]string{
 		"Commands:",
 		"/start - show current state",
+		"/menu - show quick action buttons",
 		"/folder - choose a configured folder",
 		"/model - choose a Pi model",
 		"/skills - show available Pi skills",
+		"/sessions - list and resume existing Pi sessions",
+		"/resume - alias for /sessions",
 		"/new - start a new Pi session",
 		"/abort - abort current Pi turn",
 		"/status - show current status",

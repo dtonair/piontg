@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"piontg/pi"
+	"piontg/pisessions"
 )
 
 // PiClient is the subset of Pi RPC behavior needed by the session manager.
@@ -22,6 +23,8 @@ type PiClient interface {
 	NewSession(ctx context.Context) (bool, error)
 	StderrTail() string
 }
+
+type SessionSummary = pisessions.Summary
 
 type PromptRequest struct {
 	Message string

@@ -13,6 +13,7 @@ import (
 	"piontg/config"
 	"piontg/folders"
 	"piontg/pi"
+	"piontg/pisessions"
 	"piontg/store"
 )
 
@@ -91,11 +92,7 @@ func clearNonDefaultPiSessionState(state *store.State) bool {
 }
 
 func defaultPiSessionsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
-	}
-	return filepath.Join(home, ".pi", "agent", "sessions"), nil
+	return pisessions.DefaultDir()
 }
 
 func pathWithinDir(dir, path string) bool {
@@ -173,6 +170,123 @@ func (m *Manager) AvailableCommands(ctx context.Context) ([]pi.CommandInfo, erro
 		return nil, err
 	}
 	return client.GetCommands(ctx)
+}
+
+func (m *Manager) ListSessions(ctx context.Context) ([]SessionSummary, error) {
+	return pisessions.Discover(ctx, pisessions.Options{
+		ResolveFolder: func(path string) (string, error) {
+			canonical, _, err := m.policy.Resolve(path)
+			return canonical, err
+		},
+	})
+}
+
+func (m *Manager) ResumeSession(ctx context.Context, file string) error {
+	summary, effective, err := m.validateSessionForResume(file)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	if m.isStreaming {
+		m.mu.Unlock()
+		return fmt.Errorf("pi is currently streaming; wait or abort before resuming another session")
+	}
+	previous := m.state
+	client := m.client
+	m.client = nil
+	m.isStreaming = false
+	m.state.SelectedFolder = summary.CWD
+	m.state.SessionFile = summary.File
+	m.state.SessionID = summary.ID
+	m.policyForSelected = effective
+	resumed := m.state
+	m.mu.Unlock()
+
+	if client != nil {
+		_ = client.Stop(ctx)
+	}
+	if err := m.store.Save(&resumed); err != nil {
+		m.restoreState(previous)
+		return err
+	}
+	if _, err := m.EnsureStarted(ctx); err != nil {
+		m.restoreState(previous)
+		_ = m.store.Save(&previous)
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) validateSessionForResume(file string) (SessionSummary, folders.EffectivePolicy, error) {
+	sessionDir, err := defaultPiSessionsDir()
+	if err != nil {
+		return SessionSummary{}, folders.EffectivePolicy{}, err
+	}
+	canonicalFile, err := canonicalSessionFileWithinDir(sessionDir, file)
+	if err != nil {
+		return SessionSummary{}, folders.EffectivePolicy{}, err
+	}
+	summary, err := pisessions.ReadSummary(canonicalFile)
+	if err != nil {
+		return SessionSummary{}, folders.EffectivePolicy{}, err
+	}
+	canonicalFolder, effective, err := m.policy.Resolve(summary.CWD)
+	if err != nil {
+		return SessionSummary{}, folders.EffectivePolicy{}, err
+	}
+	summary.CWD = canonicalFolder
+	return summary, effective, nil
+}
+
+func canonicalSessionFileWithinDir(dir, file string) (string, error) {
+	if strings.TrimSpace(file) == "" {
+		return "", fmt.Errorf("session file is required")
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve session dir: %w", err)
+	}
+	dirResolved, err := filepath.EvalSymlinks(dirAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve session dir symlinks: %w", err)
+	}
+	fileAbs, err := filepath.Abs(file)
+	if err != nil {
+		return "", fmt.Errorf("resolve session file: %w", err)
+	}
+	fileResolved, err := filepath.EvalSymlinks(fileAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve session file symlinks: %w", err)
+	}
+	info, err := os.Stat(fileResolved)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("session file %q is a directory", file)
+	}
+	if !pathWithinDir(dirResolved, fileResolved) {
+		return "", fmt.Errorf("session file %q is outside Pi session directory", file)
+	}
+	return fileResolved, nil
+}
+
+func (m *Manager) restoreState(state store.State) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state = state
+	m.client = nil
+	m.isStreaming = false
+	if state.SelectedFolder != "" {
+		if _, effective, err := m.policy.Resolve(state.SelectedFolder); err == nil {
+			m.policyForSelected = effective
+		} else {
+			m.policyForSelected = folders.EffectivePolicy{}
+		}
+	} else {
+		m.policyForSelected = folders.EffectivePolicy{}
+	}
 }
 
 func (m *Manager) Prompt(ctx context.Context, message string) error {

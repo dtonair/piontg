@@ -50,21 +50,25 @@ func (f *fakeMessenger) AnswerCallback(_ context.Context, _ string, text string)
 type fakeSession struct {
 	models   []pi.ModelInfo
 	commands []pi.CommandInfo
+	sessions []session.SessionSummary
 	status   session.Status
 	events   chan pi.Event
 
-	selectedFolder string
-	selectedModel  string
-	prompts        []string
-	promptRequests []session.PromptRequest
-	uiResponses    []string
-	uiPayloads     []map[string]any
-	uiErr          error
-	aborts         int
-	newSessions    int
-	stops          int
-	availableErr   error
-	promptErr      error
+	selectedFolder      string
+	selectedModel       string
+	prompts             []string
+	promptRequests      []session.PromptRequest
+	resumedSessionFiles []string
+	uiResponses         []string
+	uiPayloads          []map[string]any
+	uiErr               error
+	aborts              int
+	newSessions         int
+	stops               int
+	availableErr        error
+	listSessionsErr     error
+	resumeSessionErr    error
+	promptErr           error
 }
 
 func newFakeSession() *fakeSession {
@@ -89,6 +93,13 @@ func (f *fakeSession) AvailableModels(context.Context) ([]pi.ModelInfo, error) {
 }
 func (f *fakeSession) AvailableCommands(context.Context) ([]pi.CommandInfo, error) {
 	return f.commands, nil
+}
+func (f *fakeSession) ListSessions(context.Context) ([]session.SessionSummary, error) {
+	return f.sessions, f.listSessionsErr
+}
+func (f *fakeSession) ResumeSession(_ context.Context, file string) error {
+	f.resumedSessionFiles = append(f.resumedSessionFiles, file)
+	return f.resumeSessionErr
 }
 func (f *fakeSession) Prompt(_ context.Context, message string) error {
 	f.prompts = append(f.prompts, message)
@@ -351,6 +362,62 @@ func TestStartHelpStatusCommands(t *testing.T) {
 	if !strings.Contains(messenger.sends[0].text, "Pi Telegram bot ready") || !strings.Contains(messenger.sends[1].text, "Commands:") || !strings.Contains(messenger.sends[2].text, "Status:") {
 		t.Fatalf("unexpected sends = %#v", messenger.sends)
 	}
+	if !keyboardHasButton(messenger.sends[0].keyboard, "Quick menu", "cmd:menu") {
+		t.Fatalf("start keyboard missing quick menu: %#v", messenger.sends[0].keyboard)
+	}
+	if !strings.Contains(messenger.sends[1].text, "/menu - show quick action buttons") {
+		t.Fatalf("help missing /menu: %q", messenger.sends[1].text)
+	}
+	if !strings.Contains(messenger.sends[1].text, "/sessions - list and resume existing Pi sessions") {
+		t.Fatalf("help missing /sessions: %q", messenger.sends[1].text)
+	}
+}
+
+func TestQuickMenuCommandAndCallback(t *testing.T) {
+	h, messenger, _, _ := setupHandler()
+	ctx := context.Background()
+	if err := h.HandleUpdate(ctx, Update{Message: &Message{ChatID: 1, UserID: 42, Text: "/menu"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(messenger.sends) != 1 || messenger.sends[0].text != "Quick actions:" {
+		t.Fatalf("menu sends = %#v", messenger.sends)
+	}
+	for _, want := range []Button{
+		{Text: "Status", Data: "cmd:status"},
+		{Text: "Help", Data: "cmd:help"},
+		{Text: "Folder", Data: "cmd:folder"},
+		{Text: "Model", Data: "cmd:model"},
+		{Text: "Skills", Data: "cmd:skills"},
+		{Text: "Sessions", Data: "cmd:sessions"},
+		{Text: "New session", Data: "cmd:new"},
+		{Text: "Abort", Data: "cmd:abort"},
+		{Text: "Stop", Data: "cmd:stop"},
+	} {
+		if !keyboardHasButton(messenger.sends[0].keyboard, want.Text, want.Data) {
+			t.Fatalf("menu keyboard missing %#v: %#v", want, messenger.sends[0].keyboard)
+		}
+	}
+
+	if err := h.HandleUpdate(ctx, Update{Callback: &Callback{ID: "cb", ChatID: 1, UserID: 42, Data: "cmd:menu"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(messenger.callbacks) != 1 || messenger.callbacks[0] != "OK" {
+		t.Fatalf("callbacks = %#v", messenger.callbacks)
+	}
+	if len(messenger.sends) != 2 || messenger.sends[1].text != "Quick actions:" {
+		t.Fatalf("callback menu sends = %#v", messenger.sends)
+	}
+}
+
+func keyboardHasButton(keyboard InlineKeyboard, text, data string) bool {
+	for _, row := range keyboard {
+		for _, button := range row {
+			if button.Text == text && button.Data == data {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestFolderPickerAndCallback(t *testing.T) {
@@ -411,6 +478,86 @@ func TestSkillPickerAndCallback(t *testing.T) {
 	last := messenger.sends[len(messenger.sends)-1].text
 	if !strings.Contains(last, "Skill: asana-cli") || !strings.Contains(last, "/skill:asana-cli <request>") || !strings.Contains(last, "Use Asana") {
 		t.Fatalf("skill details = %q", last)
+	}
+}
+
+func TestSessionPickerAndCallback(t *testing.T) {
+	h, messenger, sess, _ := setupHandler()
+	ctx := context.Background()
+	sess.sessions = []session.SessionSummary{{
+		File:    "/sessions/app/one.jsonl",
+		ID:      "abcdef123456",
+		CWD:     "/root/app",
+		Name:    "Fix resume",
+		Preview: "older preview",
+		LastAt:  time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC),
+	}}
+
+	if err := h.HandleUpdate(ctx, Update{Message: &Message{ChatID: 1, UserID: 42, Text: "/sessions"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(messenger.sends) != 1 || !strings.Contains(messenger.sends[0].text, "Choose a Pi session") || len(messenger.sends[0].keyboard) != 1 {
+		t.Fatalf("session picker sends = %#v", messenger.sends)
+	}
+	button := messenger.sends[0].keyboard[0][0]
+	if !strings.HasPrefix(button.Data, callbackSessionPrefix) || len(button.Data) > 64 {
+		t.Fatalf("session button = %#v", button)
+	}
+	if !strings.Contains(button.Text, "app") || !strings.Contains(button.Text, "Fix resume") {
+		t.Fatalf("session label = %q", button.Text)
+	}
+
+	if err := h.HandleUpdate(ctx, Update{Callback: &Callback{ID: "cb", ChatID: 1, UserID: 42, Data: button.Data}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.resumedSessionFiles) != 1 || sess.resumedSessionFiles[0] != "/sessions/app/one.jsonl" {
+		t.Fatalf("resumed files = %#v", sess.resumedSessionFiles)
+	}
+	if last := messenger.callbacks[len(messenger.callbacks)-1]; last != "Session resumed" {
+		t.Fatalf("callbacks = %#v", messenger.callbacks)
+	}
+	if last := messenger.sends[len(messenger.sends)-1].text; !strings.Contains(last, "Resumed Pi session") || !strings.Contains(last, "abcdef123456") {
+		t.Fatalf("resume confirmation = %q", last)
+	}
+}
+
+func TestResumeAliasAndEmptySessionList(t *testing.T) {
+	h, messenger, _, _ := setupHandler()
+	if err := h.HandleUpdate(context.Background(), Update{Message: &Message{ChatID: 1, UserID: 42, Text: "/resume"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(messenger.sends) != 1 || !strings.Contains(messenger.sends[0].text, "No Pi sessions found") {
+		t.Fatalf("sends = %#v", messenger.sends)
+	}
+}
+
+func TestSessionCallbackExpiredAndResumeFailure(t *testing.T) {
+	h, messenger, sess, _ := setupHandler()
+	ctx := context.Background()
+	if err := h.HandleUpdate(ctx, Update{Callback: &Callback{ID: "cb1", ChatID: 1, UserID: 42, Data: callbackSessionPrefix + "missing"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(messenger.callbacks) != 1 || messenger.callbacks[0] != "Session list expired" {
+		t.Fatalf("callbacks = %#v", messenger.callbacks)
+	}
+	if !strings.Contains(messenger.sends[0].text, "Run /sessions again") {
+		t.Fatalf("expired message = %#v", messenger.sends)
+	}
+
+	sess.sessions = []session.SessionSummary{{File: "/sessions/app/one.jsonl", ID: "sid", CWD: "/root/app"}}
+	sess.resumeSessionErr = errors.New("pi is currently streaming")
+	if err := h.HandleUpdate(ctx, Update{Message: &Message{ChatID: 1, UserID: 42, Text: "/sessions"}}); err != nil {
+		t.Fatal(err)
+	}
+	button := messenger.sends[len(messenger.sends)-1].keyboard[0][0]
+	if err := h.HandleUpdate(ctx, Update{Callback: &Callback{ID: "cb2", ChatID: 1, UserID: 42, Data: button.Data}}); err == nil {
+		t.Fatal("HandleUpdate() error = nil, want resume failure")
+	}
+	if last := messenger.callbacks[len(messenger.callbacks)-1]; last != "Resume failed" {
+		t.Fatalf("callbacks = %#v", messenger.callbacks)
+	}
+	if last := messenger.sends[len(messenger.sends)-1].text; !strings.Contains(last, "pi is currently streaming") {
+		t.Fatalf("failure message = %q", last)
 	}
 }
 

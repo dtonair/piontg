@@ -58,6 +58,8 @@ type Session interface {
 	SelectModel(ctx context.Context, provider, modelID string) error
 	AvailableModels(ctx context.Context) ([]pi.ModelInfo, error)
 	AvailableCommands(ctx context.Context) ([]pi.CommandInfo, error)
+	ListSessions(ctx context.Context) ([]session.SessionSummary, error)
+	ResumeSession(ctx context.Context, file string) error
 	Prompt(ctx context.Context, message string) error
 	PromptRequest(ctx context.Context, req session.PromptRequest) error
 	RespondExtensionUI(ctx context.Context, requestID string, payload map[string]any) error

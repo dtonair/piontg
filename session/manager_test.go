@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,12 +17,20 @@ import (
 )
 
 type fakeFactory struct {
-	clients []*fakeClient
-	opts    []pi.Options
+	clients  []*fakeClient
+	opts     []pi.Options
+	startErr error
 }
 
 func (f *fakeFactory) Start(_ context.Context, opts pi.Options) (PiClient, error) {
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
 	client := newFakeClient()
+	if opts.SessionFile != "" {
+		client.state.SessionFile = opts.SessionFile
+		client.state.SessionID = "resumed"
+	}
 	f.clients = append(f.clients, client)
 	f.opts = append(f.opts, opts)
 	return client, nil
@@ -221,6 +231,130 @@ func TestManagerPreservesDefaultPiSessionStateOnStart(t *testing.T) {
 	}
 	if len(factory.opts) != 1 || factory.opts[0].SessionFile != sessionFile {
 		t.Fatalf("opts = %#v, want session file %q", factory.opts, sessionFile)
+	}
+}
+
+func TestManagerListSessionsUsesAllowedFolderPolicy(t *testing.T) {
+	ctx := context.Background()
+	m, _, root := setupManager(t, config.StreamingFollowUp)
+	storeDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", storeDir)
+	child := mkdir(t, root, "child")
+	outside := mkdir(t, filepath.Dir(root), "outside")
+	writePiSession(t, filepath.Join(storeDir, "allowed", "one.jsonl"), "one", child, "Allowed session")
+	writePiSession(t, filepath.Join(storeDir, "denied", "two.jsonl"), "two", outside, "Denied session")
+
+	sessions, err := m.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1: %#v", len(sessions), sessions)
+	}
+	if sessions[0].ID != "one" || sessions[0].CWD != canonical(t, child) {
+		t.Fatalf("session = %#v", sessions[0])
+	}
+}
+
+func TestManagerResumeSessionStartsWithSelectedSessionAndPersists(t *testing.T) {
+	ctx := context.Background()
+	m, factory, root := setupManager(t, config.StreamingFollowUp)
+	storeDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", storeDir)
+	child := mkdir(t, root, "child")
+	if err := m.SelectFolder(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.EnsureStarted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := writePiSession(t, filepath.Join(storeDir, "project", "resume.jsonl"), "resume-id", child, "Resume me")
+	canonicalSessionFile := canonical(t, sessionFile)
+
+	if err := m.ResumeSession(ctx, sessionFile); err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
+	}
+	if len(factory.opts) != 2 {
+		t.Fatalf("opts = %#v, want two starts", factory.opts)
+	}
+	if !factory.clients[0].stopped {
+		t.Fatalf("previous client was not stopped")
+	}
+	got := factory.opts[1]
+	if got.CWD != canonical(t, child) || got.SessionFile != canonicalSessionFile {
+		t.Fatalf("resume opts = %#v", got)
+	}
+	status := m.Status()
+	if status.SelectedFolder != canonical(t, child) || status.SessionFile != canonicalSessionFile || status.SessionID != "resumed" || !status.IsStarted {
+		t.Fatalf("status = %#v", status)
+	}
+	persisted, err := m.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.SelectedFolder != canonical(t, child) || persisted.SessionFile != canonicalSessionFile || persisted.SessionID != "resumed" {
+		t.Fatalf("persisted = %#v", persisted)
+	}
+}
+
+func TestManagerResumeSessionRejectsStreaming(t *testing.T) {
+	ctx := context.Background()
+	m, factory, root := setupManager(t, config.StreamingFollowUp)
+	storeDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", storeDir)
+	sessionFile := writePiSession(t, filepath.Join(storeDir, "project", "resume.jsonl"), "resume-id", root, "Resume me")
+	m.mu.Lock()
+	m.isStreaming = true
+	m.mu.Unlock()
+
+	err := m.ResumeSession(ctx, sessionFile)
+	if err == nil || !strings.Contains(err.Error(), "streaming") {
+		t.Fatalf("ResumeSession() error = %v, want streaming", err)
+	}
+	if len(factory.opts) != 0 {
+		t.Fatalf("opts = %#v, want no start", factory.opts)
+	}
+}
+
+func TestManagerResumeSessionRejectsOutsideSessionStore(t *testing.T) {
+	ctx := context.Background()
+	m, _, root := setupManager(t, config.StreamingFollowUp)
+	storeDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", storeDir)
+	outsideFile := writePiSession(t, filepath.Join(t.TempDir(), "resume.jsonl"), "resume-id", root, "Resume me")
+
+	err := m.ResumeSession(ctx, outsideFile)
+	if err == nil || !strings.Contains(err.Error(), "outside Pi session directory") {
+		t.Fatalf("ResumeSession() error = %v, want outside store", err)
+	}
+}
+
+func TestManagerResumeSessionRestoresStateOnStartFailure(t *testing.T) {
+	ctx := context.Background()
+	m, factory, root := setupManager(t, config.StreamingFollowUp)
+	storeDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", storeDir)
+	child := mkdir(t, root, "child")
+	if err := m.SelectFolder(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := writePiSession(t, filepath.Join(storeDir, "project", "resume.jsonl"), "resume-id", child, "Resume me")
+	factory.startErr = errors.New("pi failed")
+
+	err := m.ResumeSession(ctx, sessionFile)
+	if err == nil || !strings.Contains(err.Error(), "pi failed") {
+		t.Fatalf("ResumeSession() error = %v, want start failure", err)
+	}
+	status := m.Status()
+	if status.SelectedFolder != canonical(t, root) || status.SessionFile != "" || status.SessionID != "" || status.IsStarted {
+		t.Fatalf("status after restore = %#v", status)
+	}
+	persisted, err := m.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.SelectedFolder != canonical(t, root) || persisted.SessionFile != "" || persisted.SessionID != "" {
+		t.Fatalf("persisted after restore = %#v", persisted)
 	}
 }
 
@@ -625,6 +759,40 @@ func setupManager(t *testing.T, streamingBehavior string) (*Manager, *fakeFactor
 		t.Fatal(err)
 	}
 	return manager, factory, root
+}
+
+func writePiSession(t *testing.T, path, id, cwd, prompt string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header, err := json.Marshal(map[string]any{
+		"type":      "session",
+		"version":   3,
+		"id":        id,
+		"timestamp": "2026-07-07T10:00:00Z",
+		"cwd":       cwd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := json.Marshal(map[string]any{
+		"type":      "message",
+		"id":        "m1",
+		"parentId":  nil,
+		"timestamp": "2026-07-07T10:01:00Z",
+		"message": map[string]any{
+			"role":    "user",
+			"content": prompt,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(append(header, '\n'), append(message, '\n')...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func mkdir(t *testing.T, parent, name string) string {
